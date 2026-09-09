@@ -43,7 +43,10 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from app.core.database import SessionLocal
+from app.llm.config import get_llm_config
+from app.llm.provider import LLMProvider, LLMResponse, LLMUsage
 from app.main import create_app
 from app.models.detection import DetectionRun
 from app.models.investigation import InvestigationFinding
@@ -1354,3 +1357,331 @@ def test_audit_pagination_walks_the_trail_without_repeating_a_row(tenant) -> Non
     assert {row["id"] for row in first}.isdisjoint({row["id"] for row in second})
     # Newest first, so each page's timestamps are not older than the previous page's.
     assert first[0]["occurred_at"] >= first[-1]["occurred_at"]
+
+
+# ---------------------------------------------------------------------------
+# The Copilot beside these two screens
+# ---------------------------------------------------------------------------
+def copilot_ask(actor, base: str, message: str, **context) -> dict:
+    """One Copilot turn, with the coordinates a screen publishes and nothing else."""
+
+    response = actor.post(
+        f"{base}/copilot/chat", json={"message": message, "context": context}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def evidence_of(body: dict, source_type: str, *, placeholder: bool) -> list[dict]:
+    return [
+        item
+        for item in body["evidence"]
+        if item["source_type"] == source_type and item["is_placeholder"] is placeholder
+    ]
+
+
+def test_the_copilot_on_a_result_screen_is_handed_the_movement_and_its_breakdown(
+    tenant, stored_run
+) -> None:
+    """A question asked beside a result carries the measurement and the shares.
+
+    The drawer opens on top of the Result page, so "what should I do about this" is
+    a question about the movement already rendered there. What makes it answerable
+    without inventing anything is the division of labour: the screen publishes
+    coordinates -- KPI, date, the dimension it broke the movement down by -- and the
+    server attaches the stored detection row and the stored breakdown itself. Both
+    have to arrive, unmarked as absent, carrying the engine's own figures. A turn
+    handed a total and no parts is a turn that will estimate parts, which is the
+    failure this attachment exists to prevent.
+
+    No model is configured in this suite, and that is what makes the assertion
+    clean: the evidence in the response *is* what a model would have been handed.
+    """
+
+    base = tenant["base"]
+    contribution = tenant["admin"].post(
+        f"{base}/investigation/contribution",
+        json={
+            "kpi_id": "revenue",
+            "target_date": COMPANY_A_TARGET.isoformat(),
+            "dimension": "region",
+        },
+    )
+    assert contribution.status_code == 200, contribution.text
+    leader = contribution.json()["result"]["contributors"][0]
+
+    body = copilot_ask(
+        tenant["admin"],
+        base,
+        "What should I do about this movement?",
+        panel="kpi_result",
+        kpi_id="revenue",
+        selected_date=COMPANY_A_TARGET.isoformat(),
+        dimension="region",
+    )
+
+    # The measurement, as the engine stored it.
+    measured = evidence_of(body, "detection_run", placeholder=False)
+    assert measured, "the stored evaluation must reach a turn asked from a result screen"
+    assert stored_run["status"] in measured[0]["content"]
+    assert f"{stored_run['actual_value']:,.2f}" in measured[0]["content"]
+
+    # The parts of it, as the breakdown stored them.
+    shares = evidence_of(body, "contribution_analysis", placeholder=False)
+    assert shares, "the stored breakdown must reach the same turn"
+    content = shares[0]["content"]
+    assert leader["entity"] in content
+    assert f"{abs(leader['share_pct']):.1f}" in content.replace("-", "")
+
+    # And the platform says back which coordinates it resolved, so the reader can
+    # see the answer is about the breakdown they are looking at.
+    assert body["context"]["dimension"] == "region"
+    assert body["context"]["selected_date"] == COMPANY_A_TARGET.isoformat()
+
+
+def test_a_reader_without_investigation_access_is_not_handed_the_breakdown(tenant) -> None:
+    """The shares are gated on the same permission as the analysis that made them.
+
+    A VIEWER may read a stored result -- that is ``analytics.read`` -- and may ask
+    the Copilot about it. What they may not have is the contribution analysis, so
+    the turn is told no breakdown is available to it rather than being handed one
+    the reader is not entitled to see. The distinction that matters is that the
+    absence is *evidence*, carrying its own instruction not to estimate shares,
+    rather than a silent omission the model is free to fill.
+    """
+
+    body = copilot_ask(
+        tenant["viewer"],
+        tenant["base"],
+        "Which region accounts for this?",
+        panel="kpi_result",
+        kpi_id="revenue",
+        selected_date=COMPANY_A_TARGET.isoformat(),
+        dimension="region",
+    )
+
+    assert not evidence_of(body, "contribution_analysis", placeholder=False), (
+        "a reader without investigation.read was handed measured shares"
+    )
+    blob = " ".join(item["content"] for item in body["evidence"])
+    for region in ("North", "South", "East", "West"):
+        assert region not in blob, f"the turn named {region} to a reader who may not see shares"
+
+
+# ---------------------------------------------------------------------------
+# What survives the trip through a model
+# ---------------------------------------------------------------------------
+# The rest of this suite runs with ``LLM_ENABLED`` false, which is the deployment
+# that must work and therefore the one most of it tests. It left the *other* path --
+# a model narration that succeeds -- with no coverage at all, and that is where a
+# real defect lived: a whole-document word budget applied before the sections were
+# recovered deleted whichever heading fell past it, and a narration missing a
+# heading is rejected outright. So a complete, faithful, slightly long rewrite was
+# thrown away and the reader silently got platform prose instead. It hit every node
+# explanation that quoted a document, which is to say every one the investigation
+# screen would ever show.
+#
+# These three tests pin the three things that must hold at once: a long but complete
+# narration is kept, a padded one is still trimmed, and an incomplete one is still
+# refused wholesale. The model is scripted, so what they assert is the platform's
+# handling rather than any model's behaviour.
+NARRATION_MODEL = "test/Narrator-Instruct-1"
+
+#: Enough words per section that the seven of them exceed the 460-word document
+#: budget this once used -- the condition under which the last heading vanished --
+#: while staying inside the per-section allowance any section now gets.
+NARRATED_SECTION_WORDS = 80
+
+NARRATION_FILLER = (
+    "the",
+    "movement",
+    "is",
+    "restated",
+    "in",
+    "plainer",
+    "words",
+    "for",
+    "a",
+    "business",
+    "reader",
+    "here",
+)
+
+
+class ScriptedNarrator(LLMProvider):
+    """A model that returns one document, and records that it was asked."""
+
+    name = "scripted-narrator"
+
+    def __init__(self, config, document: str) -> None:
+        super().__init__(config)
+        self.document = document
+        self.calls = 0
+        self.closes = 0
+
+    async def generate(self, messages, tools=None, stream=False) -> LLMResponse:
+        self.calls += 1
+        return LLMResponse(
+            text=self.document,
+            model=NARRATION_MODEL,
+            usage=LLMUsage(prompt_tokens=900, completion_tokens=600),
+        )
+
+    async def aclose(self) -> None:
+        self.closes += 1
+
+
+def narrated(
+    order: tuple[str, ...],
+    *,
+    words: int = NARRATED_SECTION_WORDS,
+    padded: dict[str, int] | None = None,
+    without: str | None = None,
+) -> str:
+    """A narration in the shape the model is asked for: heading, newline, body.
+
+    Each body opens with its own marker, so an assertion can tell a section that
+    survived intact from one the platform re-assembled or trimmed.
+    """
+
+    blocks: list[str] = []
+    for index, heading in enumerate(order, start=1):
+        if heading == without:
+            continue
+        length = (padded or {}).get(heading, words)
+        body = [f"[{index}]"]
+        body += [
+            NARRATION_FILLER[position % len(NARRATION_FILLER)]
+            for position in range(max(0, length - 1))
+        ]
+        blocks.append(heading + "\n" + " ".join(body) + ".")
+    return "\n\n".join(blocks)
+
+
+@pytest.fixture
+def narrator(monkeypatch):
+    """Switch the model on, with a scripted document in place of an endpoint.
+
+    Configured through settings, the way an operator would, so the real
+    ``LLMConfig`` resolution runs rather than being bypassed.
+    """
+
+    def install(document: str) -> ScriptedNarrator:
+        monkeypatch.setattr(settings, "llm_enabled", True)
+        monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+        monkeypatch.setattr(settings, "llm_model", NARRATION_MODEL)
+        monkeypatch.setattr(settings, "llm_base_url", "http://model.internal:8000/v1")
+        monkeypatch.setattr(settings, "llm_api_key", "sk-narration-test-never-shipped")
+        model = ScriptedNarrator(get_llm_config(), document)
+        monkeypatch.setattr("app.copilot.explain.build_provider", lambda config=None: model)
+        return model
+
+    return install
+
+
+def test_a_long_but_complete_narration_reaches_the_reader(tenant, narrator) -> None:
+    """The regression: a complete document longer than the old budget was discarded.
+
+    Seven sections of eighty words is more than the 460 the whole document was once
+    capped at, and the cap ran before the headings were recovered -- so the last
+    heading was cut off the end, the narration was rejected as incomplete, and the
+    reader was told a model had failed when it had done exactly as asked. Every
+    section's own marker has to come back for this to pass, the last one included.
+    """
+
+    document = narrated(NODE_SECTIONS)
+    assert len(document.split()) > 460, (
+        "this test only guards the defect while the document exceeds the budget that "
+        "caused it"
+    )
+    model = narrator(document)
+
+    explanation = explain_node(
+        tenant["admin"],
+        tenant["base"],
+        dimension="region",
+        entity="South",
+        use_model=True,
+    )
+
+    assert model.calls == 1, "the narration pass did not reach the model"
+    assert explanation["model_written"] is True, (
+        "a complete narration was discarded and the reader got platform prose"
+    )
+    assert explanation["model"] == NARRATION_MODEL
+    sections = sections_of(explanation)
+    assert tuple(sections) == NODE_SECTIONS
+    for index, heading in enumerate(NODE_SECTIONS, start=1):
+        assert sections[heading].startswith(f"[{index}]"), (
+            f"{heading} is not the narrated section"
+        )
+    assert not any("usable narration" in item for item in explanation["limitations"])
+
+
+def test_one_padded_section_is_trimmed_and_the_rest_are_kept(tenant, narrator) -> None:
+    """The bound still bites -- on the section that earned it, not on the document.
+
+    A model that writes five hundred words where the platform wrote forty is padding,
+    and the reader should not have to scroll through it. What must not happen is the
+    old behaviour, where one long section cost the reader every section after it.
+    """
+
+    padded_heading = "CONTRIBUTION TO THE MOVEMENT"
+    model = narrator(narrated(NODE_SECTIONS, padded={padded_heading: 500}))
+
+    explanation = explain_node(
+        tenant["admin"],
+        tenant["base"],
+        dimension="region",
+        entity="South",
+        use_model=True,
+    )
+
+    assert model.calls == 1
+    assert explanation["model_written"] is True, (
+        "one over-long section is a trimming matter, not a reason to discard the lot"
+    )
+    sections = sections_of(explanation)
+    padded_body = sections[padded_heading]
+    assert len(padded_body.split()) < 500, "the padded section was not trimmed"
+    assert padded_body.endswith("…"), (
+        "a trimmed section must end visibly mid-thought, not look finished"
+    )
+    # And the sections after it are untouched, which is the half that used to be lost.
+    for index, heading in enumerate(NODE_SECTIONS, start=1):
+        if heading == padded_heading:
+            continue
+        assert sections[heading].startswith(f"[{index}]"), heading
+        assert not sections[heading].endswith("…"), f"{heading} was trimmed and should not be"
+
+
+def test_a_narration_missing_a_section_is_still_refused_whole(tenant, narrator) -> None:
+    """All or nothing, unchanged.
+
+    Half model prose and half platform prose reads as one voice, so a limitation the
+    model dropped would pass as deliberate brevity. The draft stands instead, and the
+    reader is told why in the limitations rather than left to infer it.
+    """
+
+    model = narrator(narrated(NODE_SECTIONS, without="RECOMMENDED NEXT STEP"))
+
+    explanation = explain_node(
+        tenant["admin"],
+        tenant["base"],
+        dimension="region",
+        entity="South",
+        use_model=True,
+    )
+
+    assert model.calls == 1
+    assert explanation["model_written"] is False
+    assert explanation["model"] is None
+    sections = sections_of(explanation)
+    assert tuple(sections) == NODE_SECTIONS, "every heading is still answered"
+    for index, heading in enumerate(NODE_SECTIONS, start=1):
+        assert not sections[heading].startswith(f"[{index}]"), (
+            f"{heading} kept the model's prose from a narration that was rejected"
+        )
+    assert any("usable narration" in item for item in explanation["limitations"]), (
+        "the reader was not told these sections are the platform's own wording"
+    )

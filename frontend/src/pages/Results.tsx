@@ -1,16 +1,60 @@
+/**
+ * The Results screen: every stored KPI verdict, newest first.
+ *
+ * This is the list a business reader opens to find the movement somebody told them
+ * about, and the only route into a stored result. Four rules hold the screen
+ * together, and each one is a decision rather than a style:
+ *
+ *  1. **Narrowing belongs to the server; searching belongs to the browser.** The
+ *     stored list is capped, so filtering the page the browser happens to hold
+ *     would leave an older date unreachable. Search is a free-text scan of what is
+ *     on screen and stays local, so typing does not issue a request per keystroke.
+ *  2. **The figures at the top describe the rows underneath them.** They are
+ *     counted from the rows on screen rather than read from the server's own
+ *     `summary`, which describes the narrowed *query* — correct until somebody
+ *     types in the search box, and contradicting the visible table from then on.
+ *     The one figure the browser cannot know, the company's full stored count,
+ *     is still the server's.
+ *  3. **A row states the verdict; the reasoning lives one click away.** Seven
+ *     short columns and one clamped sentence — no statistics, no method names, no
+ *     ids. Everything behind the verdict is on the result page, which has room
+ *     for it.
+ *  4. **Colour carries meaning or nothing.** The verdict badge is the only place
+ *     a row is tinted. A deviation is not coloured by its sign, because a fall in
+ *     returns and a fall in revenue are not the same news.
+ */
+
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import type { ResultHistoryResponse, ResultHistoryItem } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { formatCompact, formatCurrency, formatDate, formatKpiName } from '../components/format'
-import { Alert, EmptyState, Field, Panel, Spinner, StatusBadge } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  Field,
+  LoadError,
+  LoadingState,
+  PageHeader,
+  Panel,
+  StatCard,
+  StatusBadge,
+} from '../components/ui'
 import { useResource } from '../components/useResource'
 
 const ALL = 'all'
 
 /** The status buttons. `all` first, then the verdicts the engine issues. */
 const STATUS_FILTERS = [ALL, 'NORMAL', 'ABNORMAL', 'LOW_CONFIDENCE'] as const
+
+/** Sentence case for the pills: the constants are shouted, a control should not be. */
+const STATUS_LABELS: Record<string, string> = {
+  [ALL]: 'All',
+  NORMAL: 'Normal',
+  ABNORMAL: 'Abnormal',
+  LOW_CONFIDENCE: 'Low confidence',
+}
 
 /**
  * A measurement in the KPI's own unit — the same rule Monitoring applies.
@@ -125,6 +169,21 @@ export default function Results() {
     })
   }, [history.data, query])
 
+  // Counted from the rows on screen — see rule 2 in the module docstring.
+  const tally = useMemo(() => {
+    const kpis = new Set<string>()
+    let abnormal = 0
+    let normal = 0
+    let lowConfidence = 0
+    for (const item of items) {
+      kpis.add(item.kpi_key)
+      if (item.status === 'ABNORMAL') abnormal += 1
+      else if (item.status === 'NORMAL') normal += 1
+      else if (item.status === 'LOW_CONFIDENCE') lowConfidence += 1
+    }
+    return { kpiCount: kpis.size, abnormal, normal, lowConfidence }
+  }, [items])
+
   function clearFilters() {
     setStatusFilter(ALL)
     setKpiFilter(ALL)
@@ -141,161 +200,180 @@ export default function Results() {
     )
   }
 
+  // First load only. Every later fetch keeps the page in place and marks itself
+  // in the panel head, so changing a filter never blanks the screen.
   if (history.loading && !history.data) {
-    return <Spinner label="Loading result history…" />
+    return (
+      <LoadingState
+        label="Loading stored results…"
+        detail="Reading every KPI verdict for this company."
+      />
+    )
   }
 
   if (history.error) {
-    return <Alert tone="error">Unable to load results. ({history.error})</Alert>
+    return (
+      <LoadError
+        message="Unable to load stored results."
+        detail={history.error}
+        onRetry={() => void history.reload()}
+      />
+    )
   }
 
-  const summary = history.data?.summary ?? {
-    total_runs: 0,
-    anomalies: 0,
-    abnormal: 0,
-    normal: 0,
-    low_confidence: 0,
-    kpi_count: 0,
-  }
-  const totalStored = history.data?.total_stored ?? summary.total_runs
+  const totalStored = history.data?.total_stored ?? history.data?.summary.total_runs ?? items.length
+  const countLine = filtered
+    ? `${items.length} shown of ${totalStored} stored`
+    : `${items.length} results · ${tally.kpiCount} ${tally.kpiCount === 1 ? 'KPI' : 'KPIs'}`
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Results</p>
-          <h1 className="mt-1 text-2xl font-semibold text-slate-100">Agent run history</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Every stored KPI verdict. Open one for the evidence behind it.
-          </p>
-        </div>
-
-        <div className="glass-nav w-fit rounded-[14px] p-1" role="group" aria-label="Status">
-          {STATUS_FILTERS.map((filter) => (
-            <button
-              key={filter}
-              type="button"
-              aria-pressed={statusFilter === filter}
-              onClick={() => setStatusFilter(filter)}
-              className={`nav-pill px-2.5 py-1.5 text-xs ${statusFilter === filter ? 'nav-pill-active' : ''}`}
-            >
-              {filter === ALL ? 'All' : filter.replace('_', ' ')}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ------------------------------------------------------------- FILTERS */}
-      <Panel
-        title="Filters"
+    <div className="space-y-4">
+      {/* -------------------------------------------------------------- header */}
+      <PageHeader
+        eyebrow="Results"
+        title="Agent run history"
+        subtitle="Every KPI the platform has judged. Open one to see what happened and what to do."
         actions={
-          filtered ? (
-            <button type="button" className="btn btn-xs btn-ghost" onClick={clearFilters}>
-              Clear filters
-            </button>
-          ) : undefined
+          <div className="glass-nav w-fit rounded-[14px] p-1" role="group" aria-label="Status">
+            {STATUS_FILTERS.map((filter) => (
+              <button
+                key={filter}
+                type="button"
+                aria-pressed={statusFilter === filter}
+                onClick={() => setStatusFilter(filter)}
+                className={`nav-pill px-2.5 py-1.5 text-xs ${statusFilter === filter ? 'nav-pill-active' : ''}`}
+              >
+                {STATUS_LABELS[filter] ?? filter}
+              </button>
+            ))}
+          </div>
         }
-      >
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Field label="KPI" hint={kpiOptions.length === 0 ? 'No results stored yet' : undefined}>
-            <select
-              className="field"
-              value={kpiFilter}
-              onChange={(event) => setKpiFilter(event.target.value)}
-            >
-              <option value={ALL}>All KPIs</option>
-              {kpiOptions.map((option) => (
-                <option key={option.kpi_key} value={option.kpi_key}>
-                  {formatKpiName(option.kpi_name)}
-                </option>
-              ))}
-            </select>
-          </Field>
+      />
 
-          <Field
-            label="Date"
-            hint={dateOptions.length > 0 ? `${dateOptions.length} run dates stored` : undefined}
-          >
-            <select
-              className="field"
-              value={dateFilter}
-              onChange={(event) => setDateFilter(event.target.value)}
-            >
-              <option value={ALL}>All dates</option>
-              {dateOptions.map((value) => (
-                <option key={value} value={value}>
-                  {formatDate(value)}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          {dimensionOptions.length > 0 ? (
-            <Field label="Dimension" hint="Results a finding was recorded against">
+      {/* ------------------------------------------------------------ controls */}
+      {/* One quiet strip rather than a titled panel: four labelled controls need
+          no heading to explain that they filter. */}
+      <Panel bodyClassName="p-3.5">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[9rem] flex-1">
+            <Field label="KPI">
               <select
                 className="field"
-                value={dimensionFilter}
-                onChange={(event) => setDimensionFilter(event.target.value)}
+                value={kpiFilter}
+                onChange={(event) => setKpiFilter(event.target.value)}
               >
-                <option value={ALL}>Any dimension</option>
-                {dimensionOptions.map((value) => (
-                  <option key={value} value={value}>
-                    {formatKpiName(value)}
+                <option value={ALL}>All KPIs</option>
+                {kpiOptions.map((option) => (
+                  <option key={option.kpi_key} value={option.kpi_key}>
+                    {formatKpiName(option.kpi_name)}
                   </option>
                 ))}
               </select>
             </Field>
+          </div>
+
+          <div className="min-w-[9rem] flex-1">
+            <Field label="Date">
+              <select
+                className="field"
+                value={dateFilter}
+                onChange={(event) => setDateFilter(event.target.value)}
+              >
+                <option value={ALL}>All dates</option>
+                {dateOptions.map((value) => (
+                  <option key={value} value={value}>
+                    {formatDate(value)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+
+          {dimensionOptions.length > 0 ? (
+            <div className="min-w-[9rem] flex-1">
+              <Field label="Dimension">
+                <select
+                  className="field"
+                  value={dimensionFilter}
+                  onChange={(event) => setDimensionFilter(event.target.value)}
+                >
+                  {/* The guidance sits in the option itself, so the control needs
+                      no caption underneath it. */}
+                  <option value={ALL}>Any area with a note</option>
+                  {dimensionOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {formatKpiName(value)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
           ) : null}
 
-          <Field label="Search" hint="KPI, status, date or stored summary">
-            <input
-              className="field"
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search these results"
-            />
-          </Field>
+          <div className="min-w-[12rem] flex-[1.4]">
+            <Field label="Search">
+              <input
+                className="field"
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="KPI, status, date or summary"
+              />
+            </Field>
+          </div>
+
+          {filtered && (
+            <button type="button" className="btn btn-xs btn-ghost" onClick={clearFilters}>
+              Clear filters
+            </button>
+          )}
         </div>
       </Panel>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <Panel title="Shown" bodyClassName="p-4">
-          <div className="text-2xl font-semibold text-slate-100">{items.length}</div>
-          <div className="mt-1 text-xs text-slate-500">
-            {filtered ? `of ${totalStored} stored` : 'Stored result rows'}
-          </div>
-        </Panel>
-        <Panel title="Anomalies" bodyClassName="p-4">
-          <div className="text-2xl font-semibold text-rose-300">{summary.anomalies}</div>
-          <div className="mt-1 text-xs text-slate-500">Outside tolerance</div>
-        </Panel>
-        <Panel title="Normal" bodyClassName="p-4">
-          <div className="text-2xl font-semibold text-emerald-300">{summary.normal}</div>
-          <div className="mt-1 text-xs text-slate-500">In line with history</div>
-        </Panel>
-        <Panel title="Low confidence" bodyClassName="p-4">
-          <div className="text-2xl font-semibold text-amber-300">{summary.low_confidence}</div>
-          <div className="mt-1 text-xs text-slate-500">Insufficient comparable history</div>
-        </Panel>
-        <Panel title="KPIs" bodyClassName="p-4">
-          <div className="text-2xl font-semibold text-sky-300">{summary.kpi_count}</div>
-          <div className="mt-1 text-xs text-slate-500">Distinct signals</div>
-        </Panel>
+      {/* --------------------------------------------------------- the verdicts */}
+      <div className="grid gap-3 sm:grid-cols-3">
+        <StatCard
+          label="Abnormal"
+          value={tally.abnormal}
+          caption="Moved outside the range its history supports"
+          tone={tally.abnormal > 0 ? 'bad' : 'muted'}
+        />
+        <StatCard
+          label="Low confidence"
+          value={tally.lowConfidence}
+          caption="Too little comparable history to judge"
+          tone={tally.lowConfidence > 0 ? 'warn' : 'muted'}
+        />
+        <StatCard
+          label="Normal"
+          value={tally.normal}
+          caption="In line with comparable days"
+          tone={tally.normal > 0 ? 'good' : 'muted'}
+        />
       </div>
 
-      <Panel title="Stored results" bodyClassName="p-0">
+      {/* -------------------------------------------------------------- results */}
+      <Panel
+        title="Stored results"
+        bodyClassName="p-0"
+        actions={
+          <span className="flex items-center gap-2 text-[11px] text-slate-500">
+            {history.loading && <span className="text-slate-500">Updating…</span>}
+            <span className="tabular-nums">{countLine}</span>
+          </span>
+        }
+      >
         {items.length === 0 ? (
           <EmptyState
-            title="No stored results match this view"
+            title={filtered ? 'Nothing matches this view' : 'No results stored yet'}
             description={
               filtered
                 ? 'Clear the filters to see every stored result for this company.'
-                : 'Review the company’s most recent KPI runs.'
+                : 'Run the agent for a date and its verdicts will be listed here.'
             }
             action={
               filtered ? (
-                <button type="button" className="btn btn-ghost" onClick={clearFilters}>
+                <button type="button" className="btn btn-xs btn-ghost" onClick={clearFilters}>
                   Clear filters
                 </button>
               ) : undefined
@@ -308,64 +386,91 @@ export default function Results() {
                 <tr>
                   <th className="table-head">KPI</th>
                   <th className="table-head">Date</th>
-                  <th className="table-head">Actual</th>
-                  <th className="table-head">Expected</th>
-                  <th className="table-head">Deviation</th>
-                  <th className="table-head">Status</th>
+                  <th className="table-head text-right">Actual</th>
+                  <th className="table-head text-right">Expected</th>
+                  <th className="table-head text-right">Movement</th>
+                  <th className="table-head">Verdict</th>
                   <th className="table-head">Summary</th>
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => (
-                  // The row is the way into the result. Each row's id is the
-                  // detection run id, so the Result page can read the same stored
-                  // evaluation back — including the evidence behind its verdict,
-                  // which no table cell has room for.
-                  <tr
-                    key={item.id}
-                    onClick={() => navigate(`/results/${item.id}`)}
-                    className="cursor-pointer border-b border-ink-800/80 align-top hover:bg-white/40"
-                  >
-                    <td className="table-cell min-w-[12rem]">
-                      <div className="font-medium text-slate-100">{formatKpiName(item.kpi_name)}</div>
-                      {subtitleFor(item) && (
-                        <div className="mt-1 text-[11px] uppercase tracking-wider text-slate-500">
-                          {subtitleFor(item)}
+                {items.map((item) => {
+                  const subtitle = subtitleFor(item)
+                  const areas = item.dimensions ?? []
+                  const name = formatKpiName(item.kpi_name)
+                  return (
+                    // The row is the way into the result. Each row's id is the
+                    // detection run id, so the Result page can read the same stored
+                    // evaluation back — including the evidence behind its verdict,
+                    // which no table cell has room for.
+                    <tr
+                      key={item.id}
+                      onClick={() => navigate(`/results/${item.id}`)}
+                      className="group cursor-pointer border-b border-ink-800/70 align-top transition-colors last:border-0 hover:bg-white/55"
+                    >
+                      <td className="table-cell min-w-[12rem] py-2.5">
+                        <div className="text-[13.5px] font-semibold leading-snug text-slate-100">
+                          {name}
                         </div>
-                      )}
-                      {(item.dimensions ?? []).length > 0 && (
-                        <div className="mt-1.5 flex flex-wrap gap-1">
-                          {(item.dimensions ?? []).map((value) => (
-                            <span key={value} className="chip">
-                              {formatKpiName(value)}
-                            </span>
-                          ))}
+                        {subtitle && (
+                          <div className="mt-0.5 text-[11px] text-slate-500">{subtitle}</div>
+                        )}
+                        {areas.length > 0 && (
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            {areas.map((value) => (
+                              <span key={value} className="chip">
+                                {formatKpiName(value)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td className="table-cell py-2.5 text-[13px] text-slate-400">
+                        {formatDate(item.target_date)}
+                      </td>
+                      <td className="table-cell py-2.5 text-right font-semibold tabular-nums text-slate-100">
+                        {formatValue(item, item.actual_value)}
+                      </td>
+                      <td className="table-cell py-2.5 text-right tabular-nums text-slate-400">
+                        {formatValue(item, item.expected_value)}
+                      </td>
+                      <td className="table-cell py-2.5 text-right">
+                        {/* Neutral by design: the sign says which way it moved, the
+                            verdict beside it says whether that matters. */}
+                        <div className="font-semibold tabular-nums text-slate-200">
+                          {formatDeviation(item)}
                         </div>
-                      )}
-                    </td>
-                    <td className="table-cell text-slate-300">{formatDate(item.target_date)}</td>
-                    <td className="table-cell font-medium tabular-nums text-slate-100">
-                      {formatValue(item, item.actual_value)}
-                    </td>
-                    <td className="table-cell tabular-nums text-slate-300">
-                      {formatValue(item, item.expected_value)}
-                    </td>
-                    <td className="table-cell tabular-nums text-slate-200">
-                      {formatDeviation(item)}
-                    </td>
-                    <td className="table-cell">
-                      <StatusBadge status={item.status} />
-                    </td>
-                    <td className="table-cell min-w-[16rem]">
-                      <div className="flex items-center gap-2">
-                        <div className="line-clamp-2 max-w-md text-sm text-slate-300">
-                          {summaryText(item) ?? 'No summary stored for this run.'}
+                        <div className="mt-0.5 text-[11px] tabular-nums text-slate-500">
+                          {formatValue(item, item.deviation_absolute)}
                         </div>
-                        <span className="btn btn-xs btn-ghost shrink-0">Open</span>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="table-cell py-2.5">
+                        <StatusBadge status={item.status} />
+                      </td>
+                      <td className="table-cell w-full min-w-[16rem] max-w-[28rem] whitespace-normal py-2.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="line-clamp-2 text-[12.5px] leading-relaxed text-slate-400">
+                            {summaryText(item) ?? 'No summary stored for this run.'}
+                          </p>
+                          {/* Keyboard and screen-reader route into the row, which a
+                              click handler alone does not provide. */}
+                          <button
+                            type="button"
+                            data-bare
+                            aria-label={`Open ${name} for ${formatDate(item.target_date)}`}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              navigate(`/results/${item.id}`)
+                            }}
+                            className="shrink-0 rounded-lg px-1.5 text-slate-500 opacity-60 transition group-hover:text-slate-200 group-hover:opacity-100"
+                          >
+                            →
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>

@@ -60,7 +60,7 @@ import {
   formatNumber,
   formatRelative,
 } from '../components/format'
-import { Alert, EmptyState, Panel, Spinner, StatusBadge } from '../components/ui'
+import { Alert, EmptyState, LoadError, LoadingState, Panel, StatusBadge } from '../components/ui'
 import { useResource } from '../components/useResource'
 
 const WINDOWS = [
@@ -507,13 +507,21 @@ export default function MonitoringOverview() {
 
   if (!mayView) return null
 
-  if (monitoring.loading && !data) return <Spinner label="Reading stored evaluations…" />
+  if (monitoring.loading && !data)
+    return (
+      <LoadingState
+        label="Reading stored evaluations…"
+        detail="Counting what this company has already judged."
+      />
+    )
 
   if (monitoring.error) {
     return (
-      <Alert tone="error">
-        Unable to load the monitoring overview. ({monitoring.error})
-      </Alert>
+      <LoadError
+        message="Unable to load the monitoring overview."
+        detail={monitoring.error}
+        onRetry={() => void monitoring.reload()}
+      />
     )
   }
 

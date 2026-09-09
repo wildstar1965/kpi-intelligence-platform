@@ -47,10 +47,11 @@ class CopilotRequestContext(CopilotSchema):
         default=None,
         max_length=40,
         description=(
-            "Which panel the question was asked from -- stage_performance, "
-            "detection_detail, historical_run, investigation, future_action. Decides "
-            "which verified result the answer is anchored to; an unrecognised value "
-            "is ignored."
+            "Which panel the question was asked from. The recognised set lives in "
+            "``app.copilot.context.PANELS``, which is the authority; an unrecognised "
+            "value is ignored rather than passed on. It decides which verified result "
+            "the answer is anchored to and, on the screens where a decision is made, "
+            "the shape the answer takes."
         ),
     )
     kpi_id: str | None = Field(

@@ -21,7 +21,7 @@
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuthProvider } from './auth/AuthContext'
 import Results from './pages/Results'
@@ -286,5 +286,83 @@ describe('the Results screen, read by a viewer who may not read findings', () =>
     expect(screen.getByLabelText(/^KPI/)).toBeTruthy()
     expect(screen.getByLabelText(/^Date/)).toBeTruthy()
     expect(screen.getByLabelText(/^Search/)).toBeTruthy()
+  })
+})
+
+/**
+ * The verdict counts above the table.
+ *
+ * They read as a description of the table, so they have to be one. The server's
+ * own `summary` counts the narrowed *query*, which is the same thing right up to
+ * the moment somebody types in the search box — and from then on it would report
+ * an anomaly the reader cannot see in a single visible row. Counting the rendered
+ * rows is what keeps the two halves of the screen telling the same story, and
+ * nothing about the layout shows when that stops being true.
+ *
+ * The company's full stored count stays the server's figure, because the browser
+ * holds one capped page and cannot know it.
+ */
+function tallyValue(label: string): string {
+  const card = Array.from(document.querySelectorAll('.stat-card')).find(
+    (node) => node.querySelector('.stat-label')?.textContent?.trim() === label,
+  )
+  if (!card) throw new Error(`No verdict count labelled "${label}"`)
+  // Found through its own card rather than by text: the status filter beside it
+  // is a button carrying the same word, so a document-wide query matches both.
+  return card.querySelector('.stat-value')?.textContent?.trim() ?? ''
+}
+
+describe('the verdict counts above the table', () => {
+  beforeEach(() => setUp(['analytics.read', 'kpi.read', 'investigation.read']))
+
+  it('counts the rows on screen, not the rows the server sent', async () => {
+    await renderResults()
+
+    expect(tallyValue('Abnormal')).toBe('1')
+    expect(tallyValue('Normal')).toBe('1')
+    expect(tallyValue('Low confidence')).toBe('0')
+
+    // A client-side search leaves the envelope untouched: it still reports one
+    // anomaly. Only the normal row is on screen, so only it may be counted.
+    fireEvent.change(screen.getByLabelText(/^Search/), { target: { value: 'orders' } })
+
+    await waitFor(() => expect(tallyValue('Abnormal')).toBe('0'))
+    expect(tallyValue('Normal')).toBe('1')
+    expect(bodyText()).toContain('of 37 stored')
+  })
+})
+
+describe('opening a stored result', () => {
+  beforeEach(() => setUp(['analytics.read', 'kpi.read', 'investigation.read']))
+
+  /**
+   * A row is opened by clicking it, which no keyboard reaches. The control at the
+   * end of the row is the accessible route to the same place, so it has to name
+   * the row it belongs to and carry that row's own id — a plausible-looking arrow
+   * that navigates to the wrong stored evaluation looks identical on screen.
+   */
+  it('routes to the stored evaluation the row was read from', async () => {
+    function Opened() {
+      const { runId } = useParams()
+      return <p>Opened {runId}</p>
+    }
+
+    render(
+      <MemoryRouter initialEntries={['/results']}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/results" element={<Results />} />
+            <Route path="/results/:runId" element={<Opened />} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+    await screen.findByText('Agent run history')
+    await waitFor(() => expect(resultCalls.length).toBeGreaterThan(0))
+
+    const open = await screen.findByRole('button', { name: /^Open Net Revenue for /i })
+    fireEvent.click(open)
+
+    await screen.findByText('Opened run-revenue')
   })
 })

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import type { KpiContract } from '../api/types'
 import type { DetectionRunSummary } from '../api/types'
 import { formatCompact, formatCurrency, formatDate, formatKpiName } from '../components/format'
-import { EmptyState, Overlay, StatusBadge } from '../components/ui'
+import { EmptyState, Modal, StatusBadge } from '../components/ui'
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -229,56 +229,62 @@ export default function KPIDetailDashboard({
         </div>
       </section>
 
-      {isRunModalOpen && selected && (
-        <Overlay>
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+      {/* One dialog, on the app's own Modal: it portals to the body (so `fixed`
+          means the viewport rather than the frosted content shell), carries the
+          same scrim as every other dialog here, caps its height on short screens
+          and closes on the scrim. All of that was hand-rolled at this call site,
+          differently. */}
+      <Modal
+        open={isRunModalOpen && Boolean(selected)}
+        onClose={() => setIsRunModalOpen(false)}
+        title="Run detail"
+        width="max-w-2xl"
+      >
+        {selected && (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-sky-700">Run detail</div>
-                <h4 className="mt-1 text-base font-semibold text-slate-900">{formatKpiName(contract.name)} · {formatDate(selected.target_date)}</h4>
+                <h4 className="text-base font-semibold text-slate-100">
+                  {formatKpiName(contract.name)} · {formatDate(selected.target_date)}
+                </h4>
+                <div className="mt-0.5 text-xs uppercase tracking-wider text-slate-500">
+                  Last 7 historical runs
+                </div>
               </div>
-              <button className="btn-ghost btn-xs" onClick={() => setIsRunModalOpen(false)} aria-label="Close run detail">Close</button>
+              <StatusBadge status={selected.status} />
             </div>
-            <div className="p-4">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs uppercase tracking-wider text-slate-500">Last 7 historical runs</div>
-                <StatusBadge status={selected.status} />
-              </div>
-              <div className="mt-4 flex h-32 items-end gap-2 overflow-x-auto border-b border-slate-300 pb-4">
-                {modalRuns.map((run) => {
-                  const height = `${Math.max(10, (Math.abs(run.actual_value ?? 0) / Math.max(...modalRuns.map((candidate) => Math.abs(candidate.actual_value ?? 0)), 1)) * 100)}%`
-                  return (
-                    <button
-                      key={run.id}
-                      className="group flex h-full min-w-8 flex-1 flex-col items-center justify-end gap-1"
-                      aria-label={`Run detail historical bar ${run.target_date}`}
-                      title={`${formatDate(run.target_date)} · Actual ${valueFor(contract, run.actual_value)}`}
-                      onClick={() => {
-                        setSelectedDate(run.target_date)
-                        setSelectedId(run.id)
-                      }}
-                    >
-                      <span className="invisible max-w-24 truncate text-[10px] text-slate-600 group-hover:visible">
-                        {valueFor(contract, run.actual_value)}
-                      </span>
-                      <span className={`w-full rounded-t-md transition-all ${statusTone(run.status)} ${selectedId === run.id ? 'ring-2 ring-sky-300 ring-offset-1' : ''}`} style={{ height }} />
-                      <span className="text-[9px] text-slate-500">{run.target_date.slice(8)}</span>
-                    </button>
-                  )
-                })}
-              </div>
-              <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Actual</dt><dd className="mt-1 text-sm font-semibold text-slate-900">{valueFor(contract, selected.actual_value)}</dd></div>
-                <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Expected</dt><dd className="mt-1 text-sm font-semibold text-slate-900">{valueFor(contract, selected.expected_value)}</dd></div>
-                <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Deviation</dt><dd className="mt-1 text-sm font-semibold text-slate-900">{signedPercent(selected.deviation_pct)}</dd></div>
-                <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Comparison</dt><dd className="mt-1 text-sm font-semibold text-slate-900">{selected.comparison_label ?? 'N/A'}</dd></div>
-              </dl>
+            <div className="mt-4 flex h-32 items-end gap-2 overflow-x-auto border-b border-slate-300 pb-4">
+              {modalRuns.map((run) => {
+                const height = `${Math.max(10, (Math.abs(run.actual_value ?? 0) / Math.max(...modalRuns.map((candidate) => Math.abs(candidate.actual_value ?? 0)), 1)) * 100)}%`
+                return (
+                  <button
+                    key={run.id}
+                    className="group flex h-full min-w-8 flex-1 flex-col items-center justify-end gap-1"
+                    aria-label={`Run detail historical bar ${run.target_date}`}
+                    title={`${formatDate(run.target_date)} · Actual ${valueFor(contract, run.actual_value)}`}
+                    onClick={() => {
+                      setSelectedDate(run.target_date)
+                      setSelectedId(run.id)
+                    }}
+                  >
+                    <span className="invisible max-w-24 truncate text-[10px] text-slate-600 group-hover:visible">
+                      {valueFor(contract, run.actual_value)}
+                    </span>
+                    <span className={`w-full rounded-t-md transition-all ${statusTone(run.status)} ${selectedId === run.id ? 'ring-2 ring-sky-300 ring-offset-1' : ''}`} style={{ height }} />
+                    <span className="text-[9px] text-slate-500">{run.target_date.slice(8)}</span>
+                  </button>
+                )
+              })}
             </div>
-          </div>
-          </div>
-        </Overlay>
-      )}
+            <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Actual</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{valueFor(contract, selected.actual_value)}</dd></div>
+              <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Expected</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{valueFor(contract, selected.expected_value)}</dd></div>
+              <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Deviation</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{signedPercent(selected.deviation_pct)}</dd></div>
+              <div><dt className="text-[10px] uppercase tracking-wider text-slate-500">Comparison</dt><dd className="mt-1 text-sm font-semibold text-slate-800">{selected.comparison_label ?? 'N/A'}</dd></div>
+            </dl>
+          </>
+        )}
+      </Modal>
 
       <section className="mt-4 rounded-xl border border-sky-200 bg-sky-50/70 p-3">
         {selected ? (

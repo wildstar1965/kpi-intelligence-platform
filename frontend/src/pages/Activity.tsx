@@ -26,7 +26,16 @@ import { api } from '../api/client'
 import type { AuditEntry, AuditOptionsResponse, TelemetrySummary } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { formatDateTime, formatNumber, formatRelative } from '../components/format'
-import { Alert, EmptyState, Field, Metric, Panel, Spinner, StatusBadge } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  Field,
+  Metric,
+  PageHeader,
+  Panel,
+  Spinner,
+  StatusBadge,
+} from '../components/ui'
 import { useResource } from '../components/useResource'
 
 export default function Activity() {
@@ -38,13 +47,10 @@ export default function Activity() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-100">Activity</h1>
-        <p className="mt-0.5 text-sm text-slate-500">
-          Governance actions and runtime cost. Both are recorded from Sprint 1 onward so later
-          sprints inherit accountability rather than adding it.
-        </p>
-      </div>
+      <PageHeader
+        title="Activity"
+        subtitle="Governance actions and runtime cost. Both are recorded from Sprint 1 onward so later sprints inherit accountability rather than adding it."
+      />
 
       <div className="flex gap-1 rounded-md border border-ink-700 bg-ink-850 p-1">
         {([

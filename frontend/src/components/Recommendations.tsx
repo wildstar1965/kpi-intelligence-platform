@@ -91,11 +91,16 @@ const STANCE_TONES: Record<string, string> = {
  * Presentation of an enum the server owns, not content: the option list itself
  * arrives in the payload, and anything not mapped here still renders — title-cased
  * — rather than disappearing from a control.
+ *
+ * The wording is the reader's question, not the schema's. `NEEDS_REVIEW` is the
+ * value a reader reaches for when the advice is aimed at the wrong thing, so it is
+ * labelled as that rather than as a workflow state — the same stored value either
+ * way, and no third enum invented to carry the distinction.
  */
 const USEFULNESS_LABELS: Record<string, string> = {
-  USEFUL: '👍 Useful',
-  NOT_USEFUL: '👎 Not useful',
-  NEEDS_REVIEW: '⚠ Needs review',
+  USEFUL: '👍 Helpful',
+  NOT_USEFUL: '👎 Not helpful',
+  NEEDS_REVIEW: '⚠ Explanation looks wrong',
 }
 
 const ACTION_STATUS_LABELS: Record<string, string> = {

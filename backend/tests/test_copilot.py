@@ -897,6 +897,61 @@ def test_the_unmeasured_notice_is_added_even_without_a_selected_date(tenants, sc
     assert any(item["is_placeholder"] for item in body["evidence"])
 
 
+def test_a_decision_screen_asks_for_the_shape_that_screen_answers_in(tenants, scripted):
+    """The two decision screens get the business shape; an approver's screen does not.
+
+    A reader on a stored result or inside one node of an investigation is reading a
+    page laid out as What happened, Key finding, Recommendation. Asking the Copilot
+    beside it is the same question about the same evidence, so an answer arriving in
+    a different vocabulary is something the reader has to translate before they can
+    use it. The substitution is safe only because the confidence obligation moves
+    rather than disappears -- thin evidence still has to be disclosed where the
+    finding is stated -- and this test pins both halves: the labels the screen uses,
+    and the disclosure that travels with them.
+
+    The generic three parts are still what the analytical screens get, which is what
+    makes this a per-panel shape rather than a rewrite of the rules.
+    """
+
+    scripted.script(says("What happened: ... Key finding: ... Recommendation: ..."))
+    ask(
+        tenants["alpha"],
+        tenants["alpha_base"],
+        "What should I do about this?",
+        kpi_id=tenants["kpi_id"],
+        panel="kpi_result",
+    )
+
+    business = scripted.system_text
+    assert "ANSWER SHAPE ON THIS SCREEN" in business
+    for label in ("What happened:", "Key finding:", "Recommendation:"):
+        assert label in business, f"the decision shape omits {label!r}"
+    # What the generic shape carries in a part of its own, folded in rather than
+    # dropped: a finding on thin evidence has to say so, and an action on thin
+    # evidence has to be an action to establish evidence.
+    assert "LOW_CONFIDENCE" in business
+    assert "too thin to act on" in business
+    # And the standing prohibitions are untouched by the substitution.
+    assert "never that it caused the movement" in business
+    assert "never promise an outcome" in business
+
+    # A different screen, a fresh transcript: the analytical shape is intact.
+    scripted.prompts.clear()
+    scripted.script(says("What happened: ... Business context: ... Confidence: ..."))
+    ask(
+        tenants["alpha"],
+        tenants["alpha_base"],
+        "What was revenue on the selected date?",
+        kpi_id=tenants["kpi_id"],
+        panel="stage_performance",
+    )
+
+    approver = scripted.system_text
+    assert "ANSWER SHAPE ON THIS SCREEN" not in approver
+    assert "Business context:" in approver
+    assert "Key finding:" not in approver
+
+
 # ---------------------------------------------------------------------------
 # 7. Prompt handling, bounds, and failure
 # ---------------------------------------------------------------------------

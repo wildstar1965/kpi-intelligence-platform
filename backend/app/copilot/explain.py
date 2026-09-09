@@ -20,6 +20,7 @@ The reader is told which of the two they are looking at, via ``model_written``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -36,11 +37,34 @@ from app.models.detection import DetectionRun
 from app.services import explanation as explanation_service
 from app.services.explanation import StructuredExplanation
 
-#: A full structured explanation needs considerably more room than a chat reply. Still bounded --
-#: an unbounded answer from a misconfigured model is a denial-of-service on the
-#: reader's attention -- and generous enough that the sections that qualify the
-#: answer, limitations and confidence, are never the ones trimmed away.
-_MAX_EXPLANATION_WORDS = 460
+#: How much longer than the platform's own wording one narrated section may run,
+#: and the floor below which that allowance is not applied.
+#:
+#: A structured explanation still has to be bounded: an unbounded answer from a
+#: misconfigured model is a denial-of-service on the reader's attention. What is
+#: bounded is each section, against the draft section it rewrites, rather than the
+#: document against one global word budget.
+#:
+#: The global budget was applied *before* the sections were recovered, and that is
+#: not a trimming rule -- it is a deletion rule. Whichever heading fell past the
+#: budget vanished, and because a partial narration is rejected outright (see
+#: ``_split_sections``), the reader lost the entire narration over a heading the
+#: model had in fact written. It hit the longer of the two explanation types: a node
+#: explanation has longer headings and quotes the retrieved documents, so its last
+#: section -- the recommended next step -- was the one past the line whenever any
+#: document was retrieved, which is the case the investigation screen is for.
+#:
+#: The draft is the correct content, so a faithful rewrite is about the same length
+#: and is never touched, while a section several times longer than the one it was
+#: asked to rewrite is padding whatever it says. Measuring against the draft also
+#: means an explanation type cannot become unnarratable simply by having more to
+#: say, which is what a single number could not express.
+_SECTION_WORD_MARGIN = 1.75
+
+#: The room any section gets regardless of how tersely the platform put it. The
+#: confidence section is often a verdict and one clause; a model that takes six
+#: sentences to say it more clearly is being helpful, not verbose.
+_MIN_SECTION_WORDS = 90
 
 #: Passage source types that count as business context. Everything else the
 #: retriever returns (KPI contracts, profiles, catalog entries) is governance
@@ -151,6 +175,27 @@ def _split_sections(text: str, order: tuple[str, ...]) -> dict[str, str] | None:
     return sections
 
 
+def _bounded(sections: dict[str, str], draft: Mapping[str, str]) -> dict[str, str]:
+    """Trim each narrated section against the draft section it rewrites.
+
+    Deliberately after :func:`_split_sections`: at this point every heading has
+    already been found with a body under it, so trimming can only shorten prose the
+    reader was going to see. It can no longer remove a heading, and so can no longer
+    cost the reader the whole narration.
+    """
+    trimmed: dict[str, str] = {}
+    for heading, body in sections.items():
+        allowance = max(
+            _MIN_SECTION_WORDS,
+            int(len((draft.get(heading) or "").split()) * _SECTION_WORD_MARGIN),
+        )
+        # `_capped` keeps whole lines while the budget allows and marks the line it
+        # cuts, so a trimmed section still ends visibly mid-thought rather than
+        # looking like the model had nothing more to say.
+        trimmed[heading] = _capped(body, allowance)
+    return trimmed
+
+
 async def narrate(
     draft: StructuredExplanation,
     context: CopilotContext,
@@ -194,9 +239,11 @@ async def narrate(
         # only fetch something the deterministic pass decided not to include.
         response = await active.generate(messages, tools=None)
         _record(usage_sink, cfg, response)
-        parsed = _split_sections(
-            _capped(plain_text(response.text or ""), _MAX_EXPLANATION_WORDS), draft.order
-        )
+        # Split first, bound second. The reverse order silently discarded complete
+        # narrations whose last heading sat past a whole-document word budget.
+        parsed = _split_sections(plain_text(response.text or ""), draft.order)
+        if parsed is not None:
+            parsed = _bounded(parsed, draft.sections)
     except Exception:  # noqa: BLE001 - a model failure must not fail the explanation
         parsed = None
     finally:

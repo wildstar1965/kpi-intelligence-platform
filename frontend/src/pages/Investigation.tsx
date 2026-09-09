@@ -75,7 +75,17 @@ import {
   formatKpiName,
   formatNumber,
 } from '../components/format'
-import { Alert, EmptyState, Field, Metric, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  Field,
+  Metric,
+  Modal,
+  PageHeader,
+  Panel,
+  Spinner,
+  StatusBadge,
+} from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilotScreen } from '../copilot/CopilotProvider'
 
@@ -123,12 +133,17 @@ function isoFromParam(value: string | null): string {
   return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : isoToday()
 }
 
-/** How a KPI verdict reads. The same words the detection surface uses. */
+/**
+ * What a KPI verdict means, in one short line a business reader can act on.
+ *
+ * These are the badge's three states said plainly. The engine's own vocabulary --
+ * tolerance, comparable history, scoring -- belongs under the technical details,
+ * not in the sentence that tells someone whether to worry.
+ */
 const STATUS_MEANING: Record<string, string> = {
-  NORMAL: 'In line with comparable history.',
-  ABNORMAL: 'Outside comparable history by more than this KPI tolerates.',
-  LOW_CONFIDENCE:
-    'Not enough comparable history to judge. The measurement stands; the verdict does not.',
+  NORMAL: 'A normal day for this KPI.',
+  ABNORMAL: 'A bigger move than this KPI usually makes.',
+  LOW_CONFIDENCE: 'Too little history to judge. The figures stand; the verdict does not.',
 }
 
 const TOP_K_CHOICES = [5, 10, 20, 50]
@@ -158,12 +173,12 @@ const MODES = [
   {
     id: 'movement' as const,
     label: 'Movement investigation',
-    caption: 'Split a stored movement across the business',
+    caption: 'Find what drove a change the platform already measured',
   },
   {
     id: 'manual' as const,
     label: 'Manual analysis',
-    caption: 'Review one dimension or one entity directly',
+    caption: 'Look up one area or one entity yourself',
   },
 ]
 
@@ -476,7 +491,10 @@ function ContributorRow({
           {kpiValue(contributor.expected, unit, currency)} usual
         </span>
         {contributor.reference_count > 0 && (
-          <span>{contributor.reference_count} comparable day(s)</span>
+          <span>
+            from {contributor.reference_count} similar day
+            {contributor.reference_count === 1 ? '' : 's'}
+          </span>
         )}
         {contributor.note && <span className="text-amber-300">{contributor.note}</span>}
         {/*
@@ -496,6 +514,148 @@ function ContributorRow({
 }
 
 /**
+ * The server's caveats, counted in the open and readable on request.
+ *
+ * Each note is a paragraph about how the figures were assembled — a withheld
+ * scope, a truncated tail, a KPI whose parts do not sum — and four of them stacked
+ * above a ranking buried the answer the reader came for. Folding them keeps the
+ * page readable; keeping the count visible, and amber, means nobody has to guess
+ * whether there is something to know. They are never dropped: a caveat a reader
+ * cannot reach is a figure presented as cleaner than it is.
+ */
+function Caveats({ notes }: { notes: string[] }) {
+  if (notes.length === 0) return null
+  return (
+    <details className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2">
+      <summary className="cursor-pointer text-xs font-medium text-amber-300">
+        {notes.length === 1
+          ? '1 thing to know about these figures'
+          : `${notes.length} things to know about these figures`}
+      </summary>
+      <ul className="mt-2 space-y-1.5 text-[12px] leading-relaxed text-slate-400">
+        {notes.map((note, index) => (
+          <li key={index}>{note}</li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
+/* ---------------------------------------------------------- business summary */
+
+/**
+ * How confident this breakdown is, read off the server's own two signals.
+ *
+ * The KPI's verdict comes first: a `LOW_CONFIDENCE` day was not judged, so nothing
+ * below it can be stated strongly however neatly the parts add up. Otherwise the
+ * label follows the coverage the engine reported — how much of the movement the
+ * listed parts account for — and the reason is printed beside the label so the word
+ * is never the only thing on screen. Nothing is computed here; both inputs are
+ * fields of the response.
+ */
+function confidenceOf(result: ContributionResult): { label: string; why: string } {
+  if (result.status === 'LOW_CONFIDENCE') {
+    return { label: 'Low', why: 'too little history to judge this date' }
+  }
+  const coverage =
+    result.shares_available && result.explained_pct !== null
+      ? Math.abs(result.explained_pct)
+      : null
+  if (coverage === null) {
+    return { label: 'Limited', why: 'the parts of this KPI do not add up to the whole' }
+  }
+  const covered = `the parts listed account for ${formatNumber(coverage)}% of the change`
+  if (coverage >= 90) return { label: 'High', why: covered }
+  if (coverage >= 60) return { label: 'Medium', why: covered }
+  return { label: 'Low', why: covered }
+}
+
+/**
+ * The whole screen in four lines, for a reader who will not read further.
+ *
+ * What changed, where it came from, how confident we are, what to do next — the
+ * four questions someone opens this page with, answered above the detail rather
+ * than assembled from it. Every figure is the server's, printed as it arrived: the
+ * verb comes from the sign of the movement, the largest part from the top of the
+ * server's ranking, and the confidence from `confidenceOf`. Nothing is divided,
+ * summed or re-ranked in the browser, because the panels below print the same
+ * numbers and two places computing would be two answers.
+ *
+ * It names no cause. "Largest part" is a measured share; "drove" or "caused" would
+ * be a claim this platform does not make from a share alone, and the reader would
+ * have no way to tell the difference.
+ */
+function BusinessSummary({
+  result,
+  nextDimension,
+}: {
+  result: ContributionResult
+  nextDimension: string | null
+}) {
+  const leader = result.contributors[0]
+  const verb =
+    result.movement === null || result.movement === 0
+      ? 'held steady'
+      : result.movement < 0
+        ? 'fell'
+        : 'rose'
+  // Only when the server sent a percentage. A browser dividing the movement by the
+  // expectation would be a second answer to a question already answered.
+  const size =
+    result.movement_pct === null || result.movement_pct === undefined
+      ? ''
+      : ` ${Math.abs(result.movement_pct).toFixed(1)}%`
+  const confidence = confidenceOf(result)
+
+  const rows: Array<{ term: string; detail: string }> = [
+    {
+      term: 'What changed',
+      detail:
+        `${formatKpiName(result.kpi)} ${verb}${size} on ${formatDate(result.target_date)} — ` +
+        `${kpiValue(result.actual, result.unit, result.currency)} against ` +
+        `${kpiValue(result.expected, result.unit, result.currency)} expected.`,
+    },
+    {
+      term: 'Where it came from',
+      detail: leader
+        ? `Largest ${result.dimension}: ${leader.label}` +
+          ` (${signedValue(leader.change, result.unit, result.currency)}` +
+          (result.shares_available && leader.share_pct !== null
+            ? `, ${signedPct(leader.share_pct)} of the change).`
+            : ').')
+        : `No ${result.dimension} values are available for this date.`,
+    },
+    { term: 'Confidence', detail: `${confidence.label} — ${confidence.why}.` },
+    {
+      term: 'Next step',
+      detail: leader
+        ? nextDimension
+          ? `Review ${leader.label}, then break it down by ${nextDimension}.`
+          : `Review ${leader.label}. This KPI has no finer breakdown registered.`
+        : 'Check which breakdowns are approved for this KPI.',
+    },
+  ]
+
+  return (
+    <Panel title="In short">
+      <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+        {rows.map((row) => (
+          <div key={row.term}>
+            <dt className="text-[11px] uppercase tracking-wider text-slate-500">{row.term}</dt>
+            {/*
+              One text run per answer, not a label and a highlighted figure. Split
+              across elements the figures read as their own headings, and a reader
+              scanning the page sees four numbers instead of four sentences.
+            */}
+            <dd className="mt-1 text-sm leading-snug text-slate-200">{row.detail}</dd>
+          </div>
+        ))}
+      </dl>
+    </Panel>
+  )
+}
+
+/**
  * The KPI's own movement, above its breakdown.
  *
  * Four figures and one verdict, in the order a reader asks for them: what
@@ -507,7 +667,7 @@ function ContributorRow({
 function MovementSummary({ result }: { result: ContributionResult }) {
   return (
     <Panel
-      title="KPI movement"
+      title="What happened"
       actions={
         <span className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
           {formatKpiName(result.kpi)} · {formatDate(result.target_date)}
@@ -531,7 +691,7 @@ function MovementSummary({ result }: { result: ContributionResult }) {
           label="Movement"
           value={signedValue(result.movement, result.unit, result.currency)}
           tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
-          hint="The whole that the parts below are measured against."
+          hint="Actual less expected"
         />
         {/* Only when the server sent it. It is nullable, and a browser dividing the
             movement by the expectation would be a second answer to a question the
@@ -541,7 +701,7 @@ function MovementSummary({ result }: { result: ContributionResult }) {
             label="Movement %"
             value={signedPct(result.movement_pct)}
             tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
-            hint="Against what was expected."
+            hint="Against expected"
           />
         )}
       </div>
@@ -608,23 +768,27 @@ function TechnicalDetails({ response }: { response: ContributionResponse }) {
 /**
  * The breakdown itself: KPI movement, ranked parts, and where to go next.
  *
- * `onDrill` is only offered when the dimension declares a next level, so a click
- * never leads to a dead end — and drilling is always the reader's choice. The
- * screen suggests stopping when one part already accounts for most of the
- * movement; it does not stop for them, and it never expands the rest on its own.
+ * The next level is read from *this* response rather than passed in. A breakdown
+ * declares its own descent, and taking the offer from anywhere else is how a
+ * screen showing sectors came to offer the step belonging to a screen the reader
+ * was not looking at — a request for coordinates from a different question.
+ *
+ * `onDrill` is absent where a descent cannot be performed at all: the manual entry
+ * point ranks one dimension and carries no ancestors, so its rows offer nothing.
+ * Where it is present, a click is still only offered when the response names a
+ * next level — so nothing here leads to a dead end.
  */
 function ContributionView({
   response,
-  nextDimension,
   onDrill,
   onBreadcrumb,
 }: {
   response: ContributionResponse
-  nextDimension: string | null
-  onDrill: (contributor: Contributor) => void
+  onDrill?: (contributor: Contributor, from: ContributionResult) => void
   onBreadcrumb: (depth: number) => void
 }) {
   const result = response.result
+  const nextDimension = result.next_dimensions?.[0] ?? null
   const contributors = result.contributors
   const leaderShare = contributors.reduce(
     (max, item) => Math.max(max, Math.abs(item.absolute_share_pct ?? 0)),
@@ -635,6 +799,8 @@ function ContributionView({
 
   return (
     <div className="space-y-4">
+      <BusinessSummary result={result} nextDimension={onDrill ? nextDimension : null} />
+
       <MovementSummary result={result} />
 
       {result.path.length > 0 && (
@@ -661,17 +827,17 @@ function ContributionView({
         </nav>
       )}
 
-      {result.notes.map((note, index) => (
-        <Alert key={index} tone="warn">
-          {note}
-        </Alert>
-      ))}
+      {/*
+        The server's caveats about how these figures were assembled, folded away
+        behind their own count so they cannot bury the ranking.
+      */}
+      <Caveats notes={result.notes} />
 
       {result.leader_is_sufficient && leader && (
         <Alert tone="info">
-          {leader.label} accounts for {signedPct(leader.share_pct)} of this movement on its own —
-          more than the {formatNumber(result.sufficiency_pct)}% this platform treats as a sufficient
-          explanation. Drilling further is available below, but the remaining parts are small.
+          {leader.label} accounts for {signedPct(leader.share_pct)} of this movement on its own,
+          past the {formatNumber(result.sufficiency_pct)}% this platform treats as a sufficient
+          explanation. You can still look deeper; the rest is small.
         </Alert>
       )}
 
@@ -704,8 +870,8 @@ function ContributionView({
       >
         {contributors.length === 0 ? (
           <EmptyState
-            title="No parts to show"
-            description={`The KPI has no ${result.dimension} values on this date that are within your access scope.`}
+            title="Nothing to break down"
+            description={`This KPI has no ${result.dimension} values on this date that you are cleared to see.`}
           />
         ) : (
           <div>
@@ -720,7 +886,9 @@ function ContributionView({
                 sharesAvailable={result.shares_available}
                 drillLabel={nextDimension}
                 onDrill={
-                  nextDimension && contributor.entity ? () => onDrill(contributor) : undefined
+                  onDrill && nextDimension && contributor.entity
+                    ? () => onDrill(contributor, result)
+                    : undefined
                 }
               />
             ))}
@@ -729,7 +897,10 @@ function ContributionView({
         {/* Said next to the ranking rather than in a footnote, because the ranking
             is exactly what invites the wrong reading. */}
         <p className="border-t border-ink-800/80 px-4 py-3 text-[11px] text-slate-500">
-          Share ≠ verdict. {nextDimension ? `Choose a driver to inspect the ${nextDimension}.` : 'This screen only rates the KPI.'}
+          A large share shows where the money moved, not that anything is wrong.{' '}
+          {onDrill && nextDimension
+            ? `Pick one to see its ${nextDimension}.`
+            : 'Only the KPI above carries a verdict.'}
         </p>
       </Panel>
 
@@ -817,7 +988,7 @@ function EntityView({
           <Metric
             label="Expected"
             value={kpiValue(result.expected ?? result.typical, result.unit, result.currency)}
-            hint={comparison ?? 'Median of the earlier days in this window.'}
+            hint={comparison ?? 'Typical for the earlier days shown.'}
           />
           <Metric
             label="Variance"
@@ -861,18 +1032,14 @@ function EntityView({
               <Metric
                 label="Share of the KPI"
                 value={`${formatNumber(Math.abs(result.share_of_kpi_pct))}%`}
-                hint={`How much of ${formatKpiName(result.kpi)} on this date this ${result.dimension} accounts for. A size, not a cause.`}
+                hint={`Share of ${formatKpiName(result.kpi)} on this date. A size, not a cause.`}
               />
             )}
           </div>
         )}
       </Panel>
 
-      {result.notes.map((note, index) => (
-        <Alert key={index} tone="warn">
-          {note}
-        </Alert>
-      ))}
+      <Caveats notes={result.notes} />
 
       {/*
         The window, drawn. The chart answers "how has this been running?"; the rows
@@ -1041,12 +1208,12 @@ function RunStatus({ gate, loading }: { gate: InvestigationEntitiesResponse | nu
     return (
       <Alert tone="warn">
         <div className="space-y-1">
-          <div className="text-sm font-semibold">Investigation unavailable for this date</div>
+          <div className="text-sm font-semibold">
+            {formatDate(gate.target_date)} has not been analysed yet
+          </div>
           <p className="text-xs leading-relaxed">{gate.message}</p>
           <p className="text-[11px] leading-relaxed opacity-90">
-            No agent run has been completed for {formatDate(gate.target_date)}, so there is no stored
-            movement to apportion and no measured entity to trend. Run the KPI analysis for this
-            date from the dashboard, then return here.
+            Run this KPI for {formatDate(gate.target_date)} from the dashboard, then come back.
           </p>
         </div>
       </Alert>
@@ -1116,7 +1283,7 @@ function EntityPicker({
       {entities.length === 0 ? (
         <EmptyState
           title="Nothing to choose from"
-          description={`This KPI has no ${gate.dimension ?? 'dimension'} values on ${formatDate(gate.target_date)} that are within your access scope.`}
+          description={`This KPI has no ${gate.dimension ?? 'dimension'} values on ${formatDate(gate.target_date)} that you are cleared to see.`}
         />
       ) : (
         <div>
@@ -1358,14 +1525,6 @@ export default function Investigation() {
   const noDimensions = dimensions.data !== null && dimensionList.length === 0
   const defaultDimension = dimensionList.find((item) => item.is_default) ?? dimensionList[0] ?? null
 
-  // Where a drill may go next, taken from the analysed result rather than from the
-  // client's copy of the hierarchy. The server already filtered its own suggestions
-  // to dimensions this KPI approved *and* this reader may query, so a button built
-  // from `next_dimensions` cannot lead somewhere the next request would refuse --
-  // which the client-side hierarchy could, and did for a contract-derived fallback
-  // that carries no hierarchy at all.
-  const nextDimension = contribution?.result.next_dimensions?.[0] ?? null
-
   // The gate, and the entity list behind it. One request answers both: whether
   // detection stored a result for this date -- which is the only thing that makes
   // an investigation available -- and, when it did, the dimension's largest values
@@ -1430,9 +1589,14 @@ export default function Investigation() {
    * The KPI, the date, the dimension on screen and the contributor selected — but
    * not one measured figure. The server re-reads the numbers from the stored run,
    * so an answer can never be anchored to something this page merely rendered.
+   *
+   * The panel narrows once the reader has drilled in. At the top level the question
+   * is about a KPI's whole movement and which part of the business accounts for
+   * most of it; inside a node it is about that node alone, and the server holds a
+   * tighter instruction for exactly that case.
    */
   useCopilotScreen({
-    panel: 'investigation',
+    panel: path.length > 0 ? 'investigation_node' : 'investigation',
     kpiId: kpiId || null,
     kpiVersion: contract?.version ?? null,
     selectedDate: date,
@@ -1515,17 +1679,23 @@ export default function Investigation() {
     void runManual(null)
   }, [runManual])
 
-  /** Drill one level: the chosen contributor becomes an ancestor. */
+  /**
+   * Drill one level: the chosen contributor becomes an ancestor.
+   *
+   * The coordinates come from `from` — the breakdown the row was clicked on —
+   * rather than from whatever level the trail is currently parked at. The two are
+   * the same in the ordinary case and differ exactly when they must not be
+   * confused: a row rendered from a response other than the current level would
+   * otherwise be sent with that level's path and that level's next dimension.
+   */
   const drill = useCallback(
-    (contributor: Contributor) => {
-      if (!contribution || !nextDimension || !contributor.entity) return
-      const step: EntityStep = {
-        dimension: contribution.result.dimension,
-        value: contributor.entity,
-      }
-      void runContribution([...contribution.result.path, step], nextDimension)
+    (contributor: Contributor, from: ContributionResult) => {
+      const next = from.next_dimensions?.[0] ?? null
+      if (!next || !contributor.entity) return
+      const step: EntityStep = { dimension: from.dimension, value: contributor.entity }
+      void runContribution([...from.path, step], next)
     },
-    [contribution, nextDimension, runContribution],
+    [runContribution],
   )
 
   /** Climb back to a shallower level of the same path — already analysed, so no refetch. */
@@ -1684,30 +1854,30 @@ export default function Investigation() {
         as an afterthought.
       */}
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Investigation</p>
-            <h1 className="mt-1 text-2xl font-semibold text-slate-800">
-              {contract ? formatKpiName(contract.name) : 'Decision workspace'}
-            </h1>
-            <p className="mt-1 text-xs text-slate-500">
-              {contract
-                ? `Contract v${contract.version} · ${formatDate(date)}`
-                : 'Choose a KPI and a date the platform has already analysed.'}
-            </p>
-          </div>
-          {gate.data?.run_available && (
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500">
-              <span className="flex items-center gap-1.5">
-                KPI status: <StatusBadge status={gate.data.kpi_status ?? undefined} />
-              </span>
-              <span>
-                Analysis:{' '}
-                <span className="font-medium text-slate-700">{gate.data.run_state ?? 'Recorded'}</span>
-              </span>
-            </div>
-          )}
-        </div>
+        <PageHeader
+          eyebrow="Investigation"
+          title={contract ? formatKpiName(contract.name) : 'Decision workspace'}
+          subtitle={
+            contract
+              ? `Contract v${contract.version} · ${formatDate(date)}`
+              : 'Choose a KPI and a date the platform has already analysed.'
+          }
+          actions={
+            gate.data?.run_available && (
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500">
+                <span className="flex items-center gap-1.5">
+                  KPI status: <StatusBadge status={gate.data.kpi_status ?? undefined} />
+                </span>
+                <span>
+                  Analysis:{' '}
+                  <span className="font-medium text-slate-700">
+                    {gate.data.run_state ?? 'Recorded'}
+                  </span>
+                </span>
+              </div>
+            )
+          }
+        />
 
         {/*
             A group of toggle buttons, not an ARIA tablist: the two modes swap the
@@ -1899,7 +2069,7 @@ export default function Investigation() {
           >
             {action.pending ? 'Analysing…' : mode === 'movement' ? 'Explain the movement' : 'Run'}
           </button>
-          {action.pending && <Spinner label="Reading the KPI's registered source…" />}
+          {action.pending && <Spinner label="Reading this KPI's data…" />}
           {/*
             Which breakdown the run will use, named before it runs and in the same
             words the result carries afterwards ("By region"), so the answer is not
@@ -1909,7 +2079,7 @@ export default function Investigation() {
           {!action.pending && mode === 'movement' && defaultDimension && !contribution && (
             <span className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
               <span className="chip">By {defaultDimension.name}</span>
-              <span>first, then down this KPI's own hierarchy.</span>
+              <span>first, then one level deeper at a time.</span>
             </span>
           )}
         </div>
@@ -1927,9 +2097,8 @@ export default function Investigation() {
         {noDimensions && (
           <div className="mt-3">
             <Alert tone="warn">
-              {contract ? formatKpiName(contract.name) : 'This KPI'} has no approved dimension to break down by. A
-              breakdown reads a dimension registered with the KPI and marked allowed; the platform
-              does not choose a column on its own.
+              {contract ? formatKpiName(contract.name) : 'This KPI'} has no approved dimension to
+              break down by. Ask a KPI owner to register one.
             </Alert>
           </div>
         )}
@@ -1949,7 +2118,6 @@ export default function Investigation() {
         (contribution ? (
           <ContributionView
             response={contribution}
-            nextDimension={nextDimension}
             onDrill={drill}
             onBreadcrumb={climb}
           />
@@ -1995,7 +2163,7 @@ export default function Investigation() {
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">
-              <span>{manual.mode === 'contribution' ? 'Contribution ranking' : 'Entity analysis'}</span>
+              <span>{manual.mode === 'contribution' ? 'Biggest contributors' : 'One entity'}</span>
               <span className="text-slate-400">•</span>
               <span>{manual.result.dimension}</span>
             </div>
@@ -2008,12 +2176,7 @@ export default function Investigation() {
             </button>
           </div>
           {manual.mode === 'contribution' ? (
-            <ContributionView
-              response={manual}
-              nextDimension={nextDimension}
-              onDrill={drill}
-              onBreadcrumb={climb}
-            />
+            <ContributionView response={manual} onBreadcrumb={climb} />
           ) : (
             <EntityView result={manual.result} evidence={manual.evidence} />
           )}
@@ -2024,7 +2187,7 @@ export default function Investigation() {
         <Panel>
           <EmptyState
             title="Nothing to investigate on this date"
-            description="No agent run has been completed for this date, so there is no entity to trend and no dimension to rank. Run the KPI analysis for this date first."
+            description="This KPI has not been analysed for this date. Run it from the dashboard first."
           />
         </Panel>
       )}
@@ -2113,12 +2276,7 @@ export default function Investigation() {
       >
         {manual &&
           (manual.mode === 'contribution' ? (
-            <ContributionView
-              response={manual}
-              nextDimension={nextDimension}
-              onDrill={drill}
-              onBreadcrumb={climb}
-            />
+            <ContributionView response={manual} onBreadcrumb={climb} />
           ) : (
             <EntityView result={manual.result} evidence={manual.evidence} />
           ))}

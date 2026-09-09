@@ -11,7 +11,7 @@
 import { useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../auth/AuthContext'
-import { Alert, Field, Panel, PasswordInput } from '../../components/ui'
+import { Alert, Field, PageHeader, Panel, PasswordInput } from '../../components/ui'
 import { useAction } from '../../components/useResource'
 import CompanyPanel from './CompanyPanel'
 import SourcesPanel from './SourcesPanel'
@@ -45,18 +45,16 @@ export default function KpiSetup() {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight text-slate-100">
-            KPI Setup &amp; Governance
-          </h1>
-          <p className="mt-0.5 truncate text-sm text-slate-500">
+      <PageHeader
+        title="KPI Setup & Governance"
+        subtitle={
+          <>
             {membership?.company_name}
             {membership?.role_name ? ` · ${membership.role_name}` : ''}
-          </p>
-        </div>
-        <LockButton />
-      </div>
+          </>
+        }
+        actions={<LockButton />}
+      />
 
       <nav className="glass-nav">
         {SUB_TABS.map((tab) => (

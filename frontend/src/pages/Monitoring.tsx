@@ -41,7 +41,16 @@ import {
   formatKpiName,
   formatRelative,
 } from '../components/format'
-import { Alert, EmptyState, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  LoadError,
+  LoadingState,
+  Modal,
+  PageHeader,
+  Panel,
+  StatusBadge,
+} from '../components/ui'
 import MonitoringOverview from '../components/MonitoringOverview'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilotScreen } from '../copilot/CopilotProvider'
@@ -221,39 +230,53 @@ export default function Monitoring() {
     label: openKpi ? formatKpiName(openKpi.kpi.name) : null,
   })
 
-  if (overview.loading && !overview.data) return <Spinner label="Loading monitored KPIs…" />
+  if (overview.loading && !overview.data)
+    return (
+      <LoadingState
+        label="Loading monitored KPIs…"
+        detail="Reading which KPIs this company can evaluate."
+      />
+    )
   if (overview.error)
-    return <Alert>Unable to load the monitoring overview. ({overview.error})</Alert>
+    return (
+      <LoadError
+        message="Unable to load the monitoring overview."
+        detail={overview.error}
+        onRetry={() => void overview.reload()}
+      />
+    )
 
   const note = overview.data?.configuration.note
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-100">
-            {membership?.company_name ? `${membership.company_name} · Monitoring` : 'Monitoring'}
-          </h1>
-          <p className="mt-0.5 text-sm text-slate-500">
+      <PageHeader
+        title={membership?.company_name ? `${membership.company_name} · Monitoring` : 'Monitoring'}
+        subtitle={
+          <>
             {detectable.length} KPI{detectable.length === 1 ? '' : 's'} ready to evaluate
             {blocked.length > 0 && ` · ${blocked.length} not ready`}
-          </p>
-        </div>
-        {rows.some((row) => row.result) && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {counts.ABNORMAL > 0 && (
-              <StatusBadge status="ABNORMAL" label={`${counts.ABNORMAL} abnormal`} />
-            )}
-            {counts.NORMAL > 0 && <StatusBadge status="NORMAL" label={`${counts.NORMAL} normal`} />}
-            {counts.LOW_CONFIDENCE > 0 && (
-              <StatusBadge
-                status="LOW_CONFIDENCE"
-                label={`${counts.LOW_CONFIDENCE} low confidence`}
-              />
-            )}
-          </div>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          rows.some((row) => row.result) && (
+            <>
+              {counts.ABNORMAL > 0 && (
+                <StatusBadge status="ABNORMAL" label={`${counts.ABNORMAL} abnormal`} />
+              )}
+              {counts.NORMAL > 0 && (
+                <StatusBadge status="NORMAL" label={`${counts.NORMAL} normal`} />
+              )}
+              {counts.LOW_CONFIDENCE > 0 && (
+                <StatusBadge
+                  status="LOW_CONFIDENCE"
+                  label={`${counts.LOW_CONFIDENCE} low confidence`}
+                />
+              )}
+            </>
+          )
+        }
+      />
 
       {/* A company with no approved comparison policy still gets answers, from a
           plain recent-days window. Saying so is the point: an unstated fallback

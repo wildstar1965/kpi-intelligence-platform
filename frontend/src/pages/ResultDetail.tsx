@@ -1,14 +1,23 @@
 /**
- * The Result page: one stored evaluation, why it says what it says, and what it
- * suggests someone consider doing about it.
+ * The Result page: one stored evaluation, what it means, and what to do next.
  *
- * Six sections, in the order a reader needs them — OVERVIEW, WHY FLAGGED,
- * CONTRIBUTORS, RECOMMENDED NEXT ACTIONS, EVIDENCE, AI EXPLANATION. The discipline
- * of the page is that every figure on it was written by the detection engine at
- * evaluation time and read back here. Nothing is recomputed in the browser: no
- * median, no z-score, no threshold comparison, no verdict. If a number is on this
- * page, a stored column holds it, and the same page shown tomorrow will show the
- * same answer.
+ * The primary view answers four questions in order and nothing else — WHAT
+ * HAPPENED, KEY FINDING, RECOMMENDED NEXT ACTIONS, and the reader's own response.
+ * A business reader should be able to open this page and be done in seconds.
+ *
+ * Everything that supports those four answers — the full contribution ranking, the
+ * statistics the verdict used, the comparable periods, the queries and the engine's
+ * own notes — lives behind one disclosure at the foot of the page. That is a change
+ * of *placement*, not of availability: no figure was removed, and a reader who has
+ * to defend a verdict can still reach every number it was built from. Hiding it
+ * outright would leave an explanation whose basis nobody can check; leading with it
+ * buried the answer under the method.
+ *
+ * The discipline of the page is unchanged: every figure on it was written by the
+ * detection engine at evaluation time and read back here. Nothing is recomputed in
+ * the browser — no median, no z-score, no threshold comparison, no verdict. If a
+ * number is on this page, a stored column holds it, and the same page shown
+ * tomorrow shows the same answer.
  *
  * Two consequences worth stating, because both are visible:
  *
@@ -17,20 +26,19 @@
  *    reader without it still gets the verdict, the movement and the comparison
  *    basis in words — and is told plainly that the statistical detail is withheld,
  *    rather than shown an empty panel that looks like missing data.
- *  - **Breaking the movement down is a query, so it is a decision.** The
- *    contributors section reads the company's own source for the date, so it runs
- *    when someone asks. Nothing on this page analyses every part of the business
- *    on load.
+ *  - **Naming the area behind a movement is a query, so it is a decision.** The
+ *    breakdown reads the company's own source for the date, so it runs when someone
+ *    asks. Nothing on this page analyses every part of the business on load.
  *
- * The recommendations section sits directly after the contributors because that is
- * the order the reasoning runs in: what moved, which part of the business accounts
- * for most of it, and only then what to consider doing. It is derived on read from
- * the same stored rows, so a breakdown run here sharpens it from the KPI as a whole
- * to a named area — which is why `runBreakdown` bumps its refresh token rather than
- * leaving two panels disagreeing about what is known.
+ * The recommendations sit directly after the key finding because that is the order
+ * the reasoning runs in: what moved, which part of the business accounts for most
+ * of it, and only then what to consider doing. They are derived on read from the
+ * same stored rows, so a breakdown run here sharpens them from the KPI as a whole
+ * to a named area — which is why `runBreakdown` bumps their refresh token rather
+ * than leaving two panels disagreeing about what is known.
  *
- * The AI explanation is an action on this page rather than a chat window beside
- * it: it explains *this* result, from this result's stored evidence.
+ * The explanation is an action on this page rather than a chat window beside it: it
+ * explains *this* result, from this result's stored evidence.
  */
 
 import { useCallback, useMemo, useState } from 'react'
@@ -56,7 +64,15 @@ import {
   formatNumber,
   titleCase,
 } from '../components/format'
-import { Alert, EmptyState, Panel, Spinner, StatusBadge } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  LoadError,
+  LoadingState,
+  PageHeader,
+  Panel,
+  StatusBadge,
+} from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilotScreen } from '../copilot/CopilotProvider'
 
@@ -96,23 +112,23 @@ function movementSentence(
     return 'The movement against the expectation was not recorded for this evaluation.'
   }
   if (absolute === 0) {
-    return `The measured value matched the expectation of ${measure(expected, unit, currency)}.`
+    return `Came in exactly at the expected ${measure(expected, unit, currency)}.`
   }
   const direction = absolute > 0 ? 'above' : 'below'
   const size = measure(Math.abs(absolute), unit, currency)
   const share = pct === null || pct === undefined ? '' : ` (${signed(pct)})`
-  return `${measure(actual, unit, currency)} measured against an expectation of ${measure(
+  return `Came in at ${measure(actual, unit, currency)} — ${size}${share} ${direction} the ${measure(
     expected,
     unit,
     currency,
-  )} — ${size} ${direction}${share}.`
+  )} expected.`
 }
 
 const VERDICT_MEANING: Record<string, string> = {
-  NORMAL: 'In line with its own comparable history.',
-  ABNORMAL: 'Outside what its comparable history supports.',
+  NORMAL: 'A normal day for this KPI.',
+  ABNORMAL: 'A bigger move than this KPI usually makes.',
   LOW_CONFIDENCE:
-    'The engine declines to judge this date: there was not enough comparable history to test against.',
+    'Too little comparable history to judge this date. The figures stand; the verdict does not.',
 }
 
 /* ------------------------------------------------------------- WHY FLAGGED */
@@ -436,6 +452,79 @@ function Contributors({
   )
 }
 
+/* -------------------------------------------------------------- KEY FINDING */
+
+/**
+ * The one to three sentences a reader needs before reading a recommendation.
+ *
+ * Every figure comes from the stored breakdown the server returned; the wording is
+ * fixed here so the page cannot say more than was measured. Three rules hold:
+ *
+ *  - **"Accounts for", never "caused".** A share of a movement is a size. Nothing
+ *    in this platform establishes causation, so nothing on this line may imply it.
+ *  - **No share is invented.** A ratio, an average or a distinct count has no
+ *    arithmetic share of its own movement, and for those the line names the largest
+ *    mover in the KPI's own unit instead of printing a percentage that would not add
+ *    up.
+ *  - **At most three.** The fourth-largest contributor to a movement has never
+ *    changed a decision, and the full ranking is one disclosure away.
+ */
+function keyFindings(
+  data: ContributionResponse,
+  unit?: string | null,
+  currency?: string | null,
+): string[] {
+  const { result } = data
+  const ranked = result.contributors
+  if (ranked.length === 0) {
+    return [
+      `No ${result.dimension} values are recorded for this date, so no part of the business is named.`,
+    ]
+  }
+
+  const shareOf = (row: (typeof ranked)[number]): number | null => {
+    const share = row.absolute_share_pct ?? row.share_pct
+    return share === null || share === undefined ? null : Math.abs(share)
+  }
+
+  const lines: string[] = []
+  const leader = ranked[0]
+  const leaderShare = shareOf(leader)
+  lines.push(
+    leaderShare === null
+      ? `Largest ${result.dimension}: ${leader.label}, ${measure(leader.change, unit, currency)} of movement.`
+      : `${leader.label} accounts for ${leaderShare.toFixed(1)}% of the movement (${measure(
+          leader.change,
+          unit,
+          currency,
+        )}).`,
+  )
+
+  const second = ranked[1]
+  if (second) {
+    const secondShare = shareOf(second)
+    lines.push(
+      secondShare === null
+        ? `Next largest: ${second.label}, ${measure(second.change, unit, currency)}.`
+        : `Next largest: ${second.label}, ${secondShare.toFixed(1)}%.`,
+    )
+  }
+
+  // The server's own judgement of whether the leader settles the question, or
+  // failing that, how much of the movement the listed parts cover between them.
+  if (result.leader_is_sufficient && leaderShare !== null) {
+    lines.push(`${leader.label} alone accounts for most of this movement; the rest is small.`)
+  } else if (result.shares_available && result.explained_pct !== null) {
+    lines.push(
+      `The ${ranked.length} shown of ${result.ranked_count} cover ${Math.abs(
+        result.explained_pct,
+      ).toFixed(1)}% of it between them.`,
+    )
+  }
+
+  return lines.slice(0, 3)
+}
+
 /* ------------------------------------------------------------------- page */
 
 export default function ResultDetail() {
@@ -523,10 +612,21 @@ export default function ResultDetail() {
   // No figures are published. The actual, the expected and the deviation are all
   // rendered above, and none of them is sent: the server re-reads them from the run
   // it stored, so the Copilot cannot be told a number by a screen.
+  //
+  // The version and the dimension are coordinates too, and both matter to the
+  // answer. The version because an older definition of this KPI may mean something
+  // different; the dimension because the server narrows the stored breakdown it
+  // attaches to the one in view — so it is published only once a breakdown has
+  // actually been run here, and stays null until then rather than naming a
+  // dimension whose analysis does not exist. No entity is published because this
+  // page ranks contributors without selecting one; drilling into a part of the
+  // business is the Investigation Center's job.
   useCopilotScreen({
     panel: 'kpi_result',
     kpiId: result?.kpi_key ?? null,
+    kpiVersion: evidence?.kpi_version ?? null,
     selectedDate: result?.target_date ?? null,
+    dimension: contribution?.result.dimension ?? null,
     label: result ? formatKpiName(result.kpi) : null,
   })
 
@@ -538,16 +638,26 @@ export default function ResultDetail() {
     )
   }
 
-  if (detail.loading && !detail.data) return <Spinner label="Loading the stored result…" />
+  if (detail.loading && !detail.data)
+    return (
+      <LoadingState
+        label="Loading the stored result…"
+        detail="Reading the evaluation the platform saved for this date."
+      />
+    )
 
   if (detail.error) {
     return (
-      <div className="space-y-3">
-        <Alert tone="error">Unable to load this result. ({detail.error})</Alert>
-        <button type="button" className="btn btn-xs btn-ghost" onClick={() => navigate('/results')}>
-          Back to results
-        </button>
-      </div>
+      <LoadError
+        message="Unable to load this result."
+        detail={detail.error}
+        onRetry={() => void detail.reload()}
+        action={
+          <button type="button" className="btn btn-xs btn-ghost" onClick={() => navigate('/results')}>
+            Back to results
+          </button>
+        }
+      />
     )
   }
 
@@ -567,37 +677,37 @@ export default function ResultDetail() {
   return (
     <div className="space-y-5">
       {/* ------------------------------------------------------------ header */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-xs text-slate-500">
+      <PageHeader
+        eyebrow={
+          <span className="flex items-center gap-2 normal-case tracking-normal">
             <Link to="/results" className="hover:text-slate-300">
               Results
             </Link>
             <span>/</span>
             <span className="uppercase tracking-[0.18em]">Result</span>
-          </div>
-          <h1 className="mt-1 text-2xl font-semibold text-slate-100">
-            {formatKpiName(result.kpi)}
-          </h1>
-          <p className="mt-1 text-sm text-slate-400">
+          </span>
+        }
+        title={formatKpiName(result.kpi)}
+        subtitle={
+          <>
             Evaluated for {formatDate(result.target_date)}
-            {detail.data?.executed_at
-              ? ` · stored ${formatDateTime(detail.data.executed_at)}`
-              : ''}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <StatusBadge status={result.status} />
-          {mayInvestigate && (
-            <Link to={investigationLink} className="btn btn-xs btn-ghost">
-              Open the Investigation Center
-            </Link>
-          )}
-        </div>
-      </div>
+            {detail.data?.executed_at ? ` · stored ${formatDateTime(detail.data.executed_at)}` : ''}
+          </>
+        }
+        actions={
+          <>
+            <StatusBadge status={result.status} />
+            {mayInvestigate && (
+              <Link to={investigationLink} className="btn btn-xs btn-ghost">
+                Investigate this movement
+              </Link>
+            )}
+          </>
+        }
+      />
 
-      {/* ---------------------------------------------------------- OVERVIEW */}
-      <Panel title="Overview">
+      {/* ----------------------------------------------------- WHAT HAPPENED */}
+      <Panel title="What happened">
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <div>
             <div className="text-[11px] uppercase tracking-wider text-slate-500">Actual</div>
@@ -606,9 +716,7 @@ export default function ResultDetail() {
             </div>
           </div>
           <div>
-            <div className="text-[11px] uppercase tracking-wider text-slate-500">
-              Expected baseline
-            </div>
+            <div className="text-[11px] uppercase tracking-wider text-slate-500">Expected</div>
             <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-100">
               {measure(result.expected, result.unit, result.currency)}
             </div>
@@ -634,7 +742,7 @@ export default function ResultDetail() {
           </div>
         </div>
 
-        <p className="mt-4 text-sm leading-relaxed text-slate-300">
+        <p className="mt-4 text-sm leading-relaxed text-slate-200">
           {movementSentence(
             result.actual,
             result.expected,
@@ -645,13 +753,13 @@ export default function ResultDetail() {
           )}
         </p>
         {result.headline && (
-          <p className="mt-2 text-[13px] leading-relaxed text-slate-400">{result.headline}</p>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-slate-500">{result.headline}</p>
         )}
 
         {mayInvestigate && openFindings.length > 0 && (
           <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3">
             <div className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">
-              Investigation notes on this movement ({openFindings.length} open)
+              Notes already recorded on this movement ({openFindings.length} open)
             </div>
             <ul className="mt-1.5 space-y-1.5">
               {openFindings.slice(0, 3).map((finding) => (
@@ -666,71 +774,82 @@ export default function ResultDetail() {
         )}
       </Panel>
 
-      {/* ------------------------------------------------------- WHY FLAGGED */}
-      <Panel title="Why this verdict">
-        {evidence ? (
-          <WhyFlagged
-            evidence={evidence}
-            status={result.status}
-            reason={evidence.reason}
-            unit={result.unit}
-            currency={result.currency}
-          />
-        ) : (
-          <Alert tone="info">
-            The statistical record behind this verdict — comparable periods, robust median,
-            dispersion, z-score and tolerance — is available to roles holding KPI governance
-            access. Your role sees the verdict, the movement and the comparison basis.
-          </Alert>
-        )}
-      </Panel>
-
-      {/* ------------------------------------------------------ CONTRIBUTORS */}
+      {/* -------------------------------------------------------- KEY FINDING */}
+      {/* What moved the KPI, in at most three lines, plus the governed explanation
+          when a reader asks for one. The full ranking these lines are drawn from is
+          in the disclosure at the foot of the page. */}
       <Panel
-        title="Contributors"
+        title="Key finding"
         actions={
-          mayInvestigate ? (
-            <button
-              type="button"
-              className="btn btn-xs btn-ghost"
-              onClick={runBreakdown}
-              disabled={breakdown.pending}
-            >
-              {breakdown.pending
-                ? 'Reading the source…'
-                : contribution
-                  ? 'Run again'
-                  : 'Break this movement down'}
-            </button>
-          ) : undefined
+          <>
+            {mayInvestigate && (
+              <button
+                type="button"
+                className="btn btn-xs btn-ghost"
+                onClick={runBreakdown}
+                disabled={breakdown.pending}
+              >
+                {breakdown.pending
+                  ? 'Reading the data…'
+                  : contribution
+                    ? 'Check again'
+                    : 'Find what drove this'}
+              </button>
+            )}
+            <ExplainButton
+              label="Explain in business terms"
+              pending={explaining.pending}
+              onClick={explainResult}
+              title="Explain this result from its stored evidence and the documents you may see"
+            />
+          </>
         }
       >
-        {!mayInvestigate ? (
-          <Alert tone="info">
-            Breaking a movement down reads the company&rsquo;s own data for the date, so it
-            requires investigation access.
-          </Alert>
-        ) : breakdown.error ? (
-          <Alert tone="error">{breakdown.error}</Alert>
-        ) : contribution ? (
-          <Contributors
-            data={contribution}
-            unit={result.unit}
-            currency={result.currency}
-          />
-        ) : (
-          <div className="space-y-2">
-            <p className="text-sm text-slate-400">
-              The movement has not been broken down yet. Doing so queries this KPI&rsquo;s own
-              source for {formatDate(result.target_date)} and ranks the parts of the business by
-              how much of the movement each accounts for.
+        <div className="space-y-3">
+          {breakdown.error && <Alert tone="error">{breakdown.error}</Alert>}
+
+          {contribution ? (
+            <ul className="space-y-2">
+              {keyFindings(contribution, result.unit, result.currency).map((line) => (
+                <li key={line} className="flex gap-2.5 text-sm leading-snug text-slate-200">
+                  <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                  <span>{line}</span>
+                </li>
+              ))}
+            </ul>
+          ) : mayInvestigate ? (
+            <p className="text-sm text-slate-500">
+              No part of the business is named yet. Find what drove this to rank the areas behind
+              the movement.
             </p>
-            <p className="text-[11px] text-slate-500">
-              Nothing is analysed automatically — and a share of a movement is a size, not a
-              proven cause.
+          ) : (
+            <p className="text-sm text-slate-500">
+              Naming the area behind a movement reads the company&rsquo;s own data for the date, so
+              it needs investigation access.
             </p>
-          </div>
-        )}
+          )}
+
+          {/* Rendered only once asked for. An empty explanation card in the primary
+              view would spend four lines saying nothing has been requested. */}
+          {(explanation || explaining.pending || explaining.error) && (
+            <ExplanationCard
+              explanation={explanation}
+              error={explaining.error}
+              pending={explaining.pending}
+              footer={
+                mayInvestigate && explanation ? (
+                  <Link to={investigationLink} className="btn btn-xs btn-ghost">
+                    Investigate which parts of the business account for this
+                  </Link>
+                ) : undefined
+              }
+            />
+          )}
+
+          <p className="text-[11px] text-slate-500">
+            A share of a movement is a size, not a proven cause.
+          </p>
+        </div>
       </Panel>
 
       {/* ------------------------------------------- RECOMMENDED NEXT ACTIONS */}
@@ -747,144 +866,198 @@ export default function ResultDetail() {
         breakdownPending={breakdown.pending}
       />
 
-      {/* ----------------------------------------------------------- EVIDENCE */}
-      <Panel title="Evidence">
-        {evidence ? (
-          <div className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 text-[12px]">
-              <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
-                <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                  KPI version
-                </div>
-                <div className="mt-1 font-semibold text-slate-800">v{evidence.kpi_version}</div>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
-                <div className="text-[11px] uppercase tracking-wider text-slate-500">Method</div>
-                <div className="mt-1 font-semibold text-slate-800">
-                  {evidence.method ?? 'Not recorded'}
-                </div>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
-                <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                  Source queries
-                </div>
-                <div className="mt-1 font-semibold text-slate-800">
-                  {evidence.query_count ?? '—'}
-                </div>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
-                <div className="text-[11px] uppercase tracking-wider text-slate-500">
-                  Evaluation time
-                </div>
-                <div className="mt-1 font-semibold text-slate-800">
-                  {evidence.duration_ms === null || evidence.duration_ms === undefined
-                    ? '—'
-                    : `${formatNumber(evidence.duration_ms)} ms`}
-                </div>
-              </div>
-            </div>
+      {/* ---------------------------------------------- EVIDENCE AND DETAILS */}
+      {/* One disclosure, closed by default, holding everything the four answers
+          above were built from. Placement, not availability: a reader who has to
+          defend a verdict still reaches every stored figure, and a reader who does
+          not never has to read past the answer to find it. */}
+      <details className="group panel">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
+          <span>
+            <span className="panel-title">Evidence &amp; details</span>
+            <span className="ml-2 text-[11px] text-slate-500">
+              The full breakdown, the statistics behind the verdict, and the periods it was
+              compared against
+            </span>
+          </span>
+          <span className="btn btn-xs btn-ghost shrink-0">
+            <span className="group-open:hidden">View</span>
+            <span className="hidden group-open:inline">Hide</span>
+          </span>
+        </summary>
 
-            <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                Comparable periods the expectation was built from ({evidence.reference.count})
-              </div>
-              {evidence.reference.points.length === 0 ? (
-                <p className="mt-1.5 text-[12px] text-slate-500">
-                  None. With no comparable periods the engine has nothing to test this date
-                  against, which is what a LOW CONFIDENCE verdict records.
-                </p>
+        <div className="space-y-6 border-t border-ink-800/80 p-4">
+          {/* -------------------------------------------------- CONTRIBUTORS */}
+          <section>
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+              Every part of the business, ranked
+            </h3>
+            <div className="mt-2">
+              {!mayInvestigate ? (
+                <Alert tone="info">
+                  Breaking a movement down reads the company&rsquo;s own data for the date, so it
+                  requires investigation access.
+                </Alert>
+              ) : contribution ? (
+                <Contributors data={contribution} unit={result.unit} currency={result.currency} />
               ) : (
-                <div className="mt-2 max-h-56 overflow-y-auto rounded-xl border border-slate-200">
-                  <table className="min-w-full text-[12px]">
-                    <thead className="bg-slate-50">
-                      <tr>
-                        <th className="px-3 py-1.5 text-left font-semibold text-slate-600">
-                          Period
-                        </th>
-                        <th className="px-3 py-1.5 text-right font-semibold text-slate-600">
-                          Value
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {evidence.reference.points.map((point) => (
-                        <tr key={point.date} className="border-t border-slate-200">
-                          <td className="px-3 py-1.5 text-slate-700">{formatDate(point.date)}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums text-slate-800">
-                            {measure(point.value, result.unit, result.currency)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <p className="text-sm text-slate-500">
+                  Not broken down yet. &ldquo;Find what drove this&rdquo; above queries this
+                  KPI&rsquo;s own source for {formatDate(result.target_date)} and ranks the parts of
+                  the business by how much of the movement each accounts for.
+                </p>
               )}
             </div>
+          </section>
 
-            {evidence.bucket.decisions.length > 0 && (
-              <div>
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                  How the comparison basis was chosen
-                </div>
-                <ul className="mt-1.5 space-y-1.5">
-                  {evidence.bucket.decisions.map((decision, index) => (
-                    <li
-                      key={`${decision.bucket}-${index}`}
-                      className="rounded-lg border border-slate-200 bg-white/60 p-2.5 text-[12px]"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-semibold text-slate-800">
-                          {titleCase(decision.bucket)}
-                        </span>
-                        <span className="chip">{titleCase(decision.role)}</span>
-                        <span className="text-slate-500">
-                          {decision.reference_count} comparable period
-                          {decision.reference_count === 1 ? '' : 's'}
-                        </span>
+          {/* --------------------------------------------------- WHY FLAGGED */}
+          <section>
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+              Why this verdict
+            </h3>
+            <div className="mt-2">
+              {evidence ? (
+                <WhyFlagged
+                  evidence={evidence}
+                  status={result.status}
+                  reason={evidence.reason}
+                  unit={result.unit}
+                  currency={result.currency}
+                />
+              ) : (
+                <Alert tone="info">
+                  The statistical record behind this verdict — comparable periods, robust median,
+                  dispersion, z-score and tolerance — is available to roles holding KPI governance
+                  access. Your role sees the verdict, the movement and the comparison basis.
+                </Alert>
+              )}
+            </div>
+          </section>
+
+          {/* ------------------------------------------------------ EVIDENCE */}
+          <section>
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+              The record behind this evaluation
+            </h3>
+            <div className="mt-2">
+              {evidence ? (
+                <div className="space-y-4">
+                  <div className="grid gap-3 text-[12px] sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
+                      <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                        KPI version
                       </div>
-                      <div className="mt-1 leading-relaxed text-slate-600">{decision.note}</div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        ) : (
-          <Alert tone="info">
-            The technical record for this evaluation is available to roles holding KPI governance
-            access.
-          </Alert>
-        )}
-      </Panel>
+                      <div className="mt-1 font-semibold text-slate-800">
+                        v{evidence.kpi_version}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
+                      <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                        Method
+                      </div>
+                      <div className="mt-1 font-semibold text-slate-800">
+                        {evidence.method ?? 'Not recorded'}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
+                      <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                        Source queries
+                      </div>
+                      <div className="mt-1 font-semibold text-slate-800">
+                        {evidence.query_count ?? '—'}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white/60 p-3">
+                      <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                        Evaluation time
+                      </div>
+                      <div className="mt-1 font-semibold text-slate-800">
+                        {evidence.duration_ms === null || evidence.duration_ms === undefined
+                          ? '—'
+                          : `${formatNumber(evidence.duration_ms)} ms`}
+                      </div>
+                    </div>
+                  </div>
 
-      {/* ----------------------------------------------------- AI EXPLANATION */}
-      <Panel
-        title="AI explanation"
-        actions={
-          <ExplainButton
-            label="Explain This Result"
-            pending={explaining.pending}
-            onClick={explainResult}
-            title="Assemble an explanation from this result's stored evidence"
-          />
-        }
-      >
-        <ExplanationCard
-          explanation={explanation}
-          error={explaining.error}
-          pending={explaining.pending}
-          emptyHint={`Ask for an explanation of ${formatKpiName(result.kpi)} on ${formatDate(
-            result.target_date,
-          )}.`}
-          footer={
-            mayInvestigate && explanation ? (
-              <Link to={investigationLink} className="btn btn-xs btn-ghost">
-                Investigate which parts of the business account for this
-              </Link>
-            ) : undefined
-          }
-        />
-      </Panel>
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      Comparable periods the expectation was built from ({evidence.reference.count})
+                    </div>
+                    {evidence.reference.points.length === 0 ? (
+                      <p className="mt-1.5 text-[12px] text-slate-500">
+                        None. With no comparable periods the engine has nothing to test this date
+                        against, which is what a LOW CONFIDENCE verdict records.
+                      </p>
+                    ) : (
+                      <div className="mt-2 max-h-56 overflow-y-auto rounded-xl border border-slate-200">
+                        <table className="min-w-full text-[12px]">
+                          <thead className="bg-slate-50">
+                            <tr>
+                              <th className="px-3 py-1.5 text-left font-semibold text-slate-600">
+                                Period
+                              </th>
+                              <th className="px-3 py-1.5 text-right font-semibold text-slate-600">
+                                Value
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {evidence.reference.points.map((point) => (
+                              <tr key={point.date} className="border-t border-slate-200">
+                                <td className="px-3 py-1.5 text-slate-700">
+                                  {formatDate(point.date)}
+                                </td>
+                                <td className="px-3 py-1.5 text-right tabular-nums text-slate-800">
+                                  {measure(point.value, result.unit, result.currency)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {evidence.bucket.decisions.length > 0 && (
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                        How the comparison basis was chosen
+                      </div>
+                      <ul className="mt-1.5 space-y-1.5">
+                        {evidence.bucket.decisions.map((decision, index) => (
+                          <li
+                            key={`${decision.bucket}-${index}`}
+                            className="rounded-lg border border-slate-200 bg-white/60 p-2.5 text-[12px]"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold text-slate-800">
+                                {titleCase(decision.bucket)}
+                              </span>
+                              <span className="chip">{titleCase(decision.role)}</span>
+                              <span className="text-slate-500">
+                                {decision.reference_count} comparable period
+                                {decision.reference_count === 1 ? '' : 's'}
+                              </span>
+                            </div>
+                            <div className="mt-1 leading-relaxed text-slate-600">
+                              {decision.note}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Alert tone="info">
+                  The technical record for this evaluation is available to roles holding KPI
+                  governance access.
+                </Alert>
+              )}
+            </div>
+          </section>
+        </div>
+      </details>
     </div>
   )
 }

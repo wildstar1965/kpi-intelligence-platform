@@ -521,6 +521,34 @@
   .text-slate-400 { color: #58728a; }
   .text-slate-500 { color: #6f879b; }
   .text-slate-600 { color: #8297a9; }
+  /* The same ink, reached from the other end.
+     The ladder above runs dark-to-light as the number rises, which is the
+     opposite of Tailwind's own scale, so the screens built later reached for
+     700-900 when they wanted emphasis and got Tailwind's untouched greys: a
+     desaturated hue, and darker than anything else on the page. On one card
+     that put a figure in cold grey next to a heading in navy -- two families
+     of text, no reason. Mapping them onto the ladder's emphasis end keeps what
+     each was authored to mean (800 is a figure, 700 is body) and leaves the app
+     with one hue. */
+  .text-slate-700 { color: #26445f; }
+  .text-slate-800 { color: #18314a; }
+  .text-slate-900 { color: #142b42; }
+  /* Hover rungs, which the ladder has to cover for the same reason it covers
+     the rest. These were written against the dark theme, where a *lower* number
+     meant a brighter glyph, so hover was a step towards white. Left un-remapped
+     on a light surface they resolve to Tailwind's near-white greys and the
+     control the reader is pointing at is the one that disappears -- every
+     dialog's close cross, every inactive tab. Remapped, hover is a step towards
+     the ink, which is what those call sites were reaching for. */
+  .hover\:text-slate-100:hover, .group:hover .group-hover\:text-slate-100 { color: #18314a; }
+  .hover\:text-slate-200:hover, .group:hover .group-hover\:text-slate-200 { color: #26445f; }
+  .hover\:text-slate-300:hover, .group:hover .group-hover\:text-slate-300 { color: #385875; }
+  .hover\:text-slate-400:hover, .group:hover .group-hover\:text-slate-400 { color: #58728a; }
+  .hover\:text-slate-500:hover, .group:hover .group-hover\:text-slate-500 { color: #6f879b; }
+  .hover\:text-slate-600:hover, .group:hover .group-hover\:text-slate-600 { color: #8297a9; }
+  .hover\:text-slate-700:hover, .group:hover .group-hover\:text-slate-700 { color: #26445f; }
+  .hover\:text-slate-800:hover, .group:hover .group-hover\:text-slate-800 { color: #18314a; }
+  .hover\:text-slate-900:hover, .group:hover .group-hover\:text-slate-900 { color: #142b42; }
   .bg-slate-900 { background-color: rgba(239, 247, 253, 0.82); }
   .border-slate-700 { border-color: #c7deef; }
   .bg-black\/60, .bg-black\/70 { background-color: rgba(45, 88, 121, 0.2); }

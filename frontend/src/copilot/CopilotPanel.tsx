@@ -26,7 +26,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { CopilotChatResponse, CopilotEvidence, CopilotStatus } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatKpiName } from '../components/format'
+import { formatKpiName, titleCase } from '../components/format'
 import { Alert, Drawer, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilot } from './CopilotProvider'
@@ -126,7 +126,7 @@ export default function CopilotPanel() {
       subtitle={
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span>{membership?.company_name}</span>
-          <span className="text-slate-700">·</span>
+          <span className="text-slate-600">·</span>
           <span>Answers from this company's governed knowledge only</span>
         </span>
       }
@@ -206,6 +206,14 @@ export default function CopilotPanel() {
 
 /* --------------------------------------------------------------- sub-sections */
 
+/**
+ * What the answer will be about, before it is asked for.
+ *
+ * Everything here was published by the screen rather than typed, so the strip is
+ * also how a reader checks that the assistant is looking where they are: an answer
+ * about the wrong date or the wrong part of the business is visible as a wrong chip
+ * before the question is sent.
+ */
 function ContextStrip({
   page,
   label,
@@ -213,7 +221,12 @@ function ContextStrip({
 }: {
   page: string
   label?: string | null
-  screen: { kpiVersion?: number | null; selectedDate?: string | null }
+  screen: {
+    kpiVersion?: number | null
+    selectedDate?: string | null
+    dimension?: string | null
+    selectedEntity?: string | null
+  }
 }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -221,6 +234,8 @@ function ContextStrip({
       {label && <span className="chip">KPI: {label}</span>}
       {screen.kpiVersion != null && <span className="chip">v{screen.kpiVersion}</span>}
       {screen.selectedDate && <span className="chip">Date: {screen.selectedDate}</span>}
+      {screen.dimension && <span className="chip">By: {titleCase(screen.dimension)}</span>}
+      {screen.selectedEntity && <span className="chip">Within: {screen.selectedEntity}</span>}
     </div>
   )
 }

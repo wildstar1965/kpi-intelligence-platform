@@ -29,6 +29,49 @@ export function Panel({
   )
 }
 
+/**
+ * A routed screen's heading: where you are, what this is, and its actions.
+ *
+ * One component rather than a similar block per page, because "similar" is what
+ * they were: the same three lines had drifted to three title sizes, two ink
+ * ladders and two subtitle margins, which reads as five screens from five
+ * products. The eyebrow is optional and says which part of the workspace this
+ * is; the title names the thing on screen, so it is the company on an overview
+ * and the KPI on an investigation.
+ *
+ * `actions` is the header's right-hand side — a status summary, a filter strip,
+ * a link onward. It wraps beneath the title on narrow screens rather than
+ * squeezing it.
+ */
+export function PageHeader({
+  eyebrow,
+  title,
+  subtitle,
+  actions,
+}: {
+  eyebrow?: ReactNode
+  title: ReactNode
+  subtitle?: ReactNode
+  actions?: ReactNode
+}) {
+  return (
+    <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+      <div className="min-w-0">
+        {eyebrow && (
+          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">{eyebrow}</p>
+        )}
+        <h1
+          className={`text-2xl font-semibold tracking-tight text-slate-100 ${eyebrow ? 'mt-1' : ''}`}
+        >
+          {title}
+        </h1>
+        {subtitle && <p className="mt-1 text-sm text-slate-500">{subtitle}</p>}
+      </div>
+      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+    </div>
+  )
+}
+
 const STATUS_TONES: Record<string, string> = {
   // Healthy / terminal-good
   ACTIVE: 'border-emerald-200 bg-emerald-50/80 text-emerald-700',
@@ -274,6 +317,67 @@ export function EmptyState({
 }
 
 /**
+ * A whole screen that is still reading, saying what it is reading.
+ *
+ * `Spinner` on its own is right inside a panel that already carries a title. A
+ * screen with nothing on it yet has no title to lean on, and an unlabelled
+ * spinner there cannot be told apart from a request that is never coming back.
+ */
+export function LoadingState({ label, detail }: { label: string; detail?: ReactNode }) {
+  return (
+    <Panel>
+      <div className="flex flex-col items-center gap-2 py-10 text-center">
+        <Spinner label={label} />
+        {detail && <p className="text-xs text-slate-500">{detail}</p>}
+      </div>
+    </Panel>
+  )
+}
+
+/**
+ * A screen that could not load, and the control that changes that.
+ *
+ * Every screen here reads through `useResource`, which holds a `reload`, so an
+ * error state that says "please refresh" is sending the reader out to the
+ * browser's own chrome to do something this page can already do — and dropping
+ * whatever they had narrowed on the way. `detail` is the server's own message:
+ * kept, because it is what makes a report actionable, and parenthesised, because
+ * it is for whoever is asked to look into it rather than for the reader.
+ */
+export function LoadError({
+  message,
+  detail,
+  onRetry,
+  action,
+}: {
+  message: string
+  detail?: string | null
+  onRetry?: () => void
+  action?: ReactNode
+}) {
+  return (
+    <Panel>
+      <div className="space-y-3">
+        <Alert tone="error">
+          {message}
+          {detail ? ` (${detail})` : ''}
+        </Alert>
+        {(onRetry || action) && (
+          <div className="flex flex-wrap items-center gap-2">
+            {onRetry && (
+              <button type="button" className="btn btn-xs btn-ghost" onClick={onRetry}>
+                Try again
+              </button>
+            )}
+            {action}
+          </div>
+        )}
+      </div>
+    </Panel>
+  )
+}
+
+/**
  * Every full-screen overlay renders into `document.body`, never in place.
  *
  * `position: fixed` is only relative to the viewport while no ancestor has
@@ -293,7 +397,8 @@ export function EmptyState({
  * mispositioned dialog and a correctly positioned one are the same document.
  * `dashboard-kpi-popup.test.tsx` therefore asserts the portal itself.
  */
-export function Overlay({ children }: { children: ReactNode }) {  if (typeof document === 'undefined') return <>{children}</>
+export function Overlay({ children }: { children: ReactNode }) {
+  if (typeof document === 'undefined') return <>{children}</>
   return createPortal(children, document.body)
 }
 
@@ -408,27 +513,26 @@ export function Placeholder({
   bullets: string[]
 }) {
   return (
-    <Panel>
-      <div className="max-w-2xl space-y-4 py-6">
-        <div>
-          <h1 className="text-lg font-semibold text-slate-100">{heading}</h1>
-          <p className="mt-1 text-sm text-slate-400">{arriving}</p>
+    <div className="space-y-4">
+      <PageHeader title={heading} subtitle={arriving} />
+      <Panel>
+        <div className="max-w-2xl space-y-4 py-2">
+          <ul className="space-y-1.5">
+            {bullets.map((item) => (
+              <li key={item} className="flex gap-2 text-sm text-slate-400">
+                <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-ink-600" />
+                {item}
+              </li>
+            ))}
+          </ul>
+          <p className="rounded-md border border-ink-700 bg-ink-850 px-3 py-2 text-xs leading-relaxed text-slate-500">
+            This surface is intentionally empty in Sprint 1. Sprint 1 establishes the governed
+            foundation — company, data, security, documents and KPI contracts. Showing invented
+            numbers here would misrepresent what the platform currently knows.
+          </p>
         </div>
-        <ul className="space-y-1.5">
-          {bullets.map((item) => (
-            <li key={item} className="flex gap-2 text-sm text-slate-400">
-              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-ink-600" />
-              {item}
-            </li>
-          ))}
-        </ul>
-        <p className="rounded-md border border-ink-700 bg-ink-850 px-3 py-2 text-xs leading-relaxed text-slate-500">
-          This surface is intentionally empty in Sprint 1. Sprint 1 establishes the governed
-          foundation — company, data, security, documents and KPI contracts. Showing invented
-          numbers here would misrepresent what the platform currently knows.
-        </p>
-      </div>
-    </Panel>
+      </Panel>
+    </div>
   )
 }
 
